@@ -2,7 +2,7 @@ from datetime import date,datetime,time,timezone
 from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import BusinessCalendar,ClassificationRule,Email,EmailStatus,Mailbox,MailboxStatus,SLARule,SLATier,SyncLog
+from app.models.entities import BusinessCalendar,ClassificationRule,Email,EmailStatus,Employee,Mailbox,MailboxStatus,SLARule,SLATier,SyncLog
 from app.services.classification import Rule,classify
 from app.services.graph import DelegatedGraphDeltaSync,GraphDeltaSync,delegated_authority_tenant
 from app.services.gmail import GmailDeltaSync
@@ -15,6 +15,12 @@ def _headers(item:dict)->dict[str,str]:return {_text(h.get("name"),120).lower():
 def _recipients(item:dict,fallback:str)->str:
     addresses=[row.get("emailAddress",{}).get("address") for row in item.get("toRecipients",[])]
     return _text(", ".join(address for address in addresses if address) or fallback,320)
+def _assignee(receiver:str, mailbox_address:str, employees:list[Employee])->int|None:
+    by_address={employee.email.strip().lower():employee.id for employee in employees if employee.active}
+    for address in [mailbox_address,*receiver.replace(";",",").split(",")]:
+        employee_id=by_address.get(address.strip().lower())
+        if employee_id is not None:return employee_id
+    return None
 def _transient_sync_error(exc:Exception)->bool:
     message=f"{type(exc).__name__}: {exc}".lower()
     return any(token in message for token in ("nameresolutionerror","temporary failure","failed to resolve","httpsconnectionpool","connectionerror","connecttimeout","readtimeout","network is unreachable"))
@@ -23,6 +29,7 @@ async def sync_all_mailboxes():
     with SessionLocal() as db:
         accounts=list(db.scalars(select(Mailbox).where(Mailbox.status!=MailboxStatus.PAUSED)))
         configured=[Rule(x.priority,x.field,x.pattern,x.classification) for x in db.scalars(select(ClassificationRule).where(ClassificationRule.active.is_(True)))]
+        employees=list(db.scalars(select(Employee).where(Employee.active.is_(True)).order_by(Employee.id)))
         sla_rules=list(db.scalars(select(SLARule)));thresholds={x.tier:x.threshold_hours for x in sla_rules};business_only=all(x.business_hours_only for x in sla_rules) if sla_rules else True
         for mailbox in accounts:
             started=datetime.now(timezone.utc);fetched=new=0;error=None
@@ -55,7 +62,13 @@ async def sync_all_mailboxes():
                     values={"conversation_id":_text(item.get("conversationId"),512) or None,"internet_message_id":_text(item.get("internetMessageId"),998) or None,"in_reply_to":_text(headers.get("in-reply-to"),998) or None,"references":_text(headers.get("references"),8000) or None,"thread_index":_text(item.get("conversationIndex"),8000) or None,"sender":sender,"receiver":_recipients(item,mailbox.address),"subject":_text(item.get("subject") or "(no subject)",4000),"received_time":received,"sent_time":sent_at,"folder":_text(folder,80),"categories":[_text(value,200) for value in item.get("categories",[])[:100]],"classification":classification,"status":EmailStatus.PENDING if folder=="inbox" and classification.value=="Customer" else EmailStatus.IGNORED,"pending_hours":pending,"sla_tier":tier}
                     if existing:
                         for key,value in values.items():setattr(existing,key,value)
-                    else:db.add(Email(mailbox_id=mailbox.id,message_id=message_id,**values));new+=1
+                        if folder=="inbox" and existing.assigned_employee_id is None:
+                            existing.assigned_employee_id=_assignee(values["receiver"],mailbox.address,employees)
+                    else:
+                        # Prefer the receiving mailbox owner, including delivery through CC, BCC or aliases.
+                        if folder=="inbox":
+                            values["assigned_employee_id"]=_assignee(values["receiver"],mailbox.address,employees)
+                        db.add(Email(mailbox_id=mailbox.id,message_id=message_id,**values));new+=1
                 db.flush();incoming=list(db.scalars(select(Email).where(Email.mailbox_id==mailbox.id,Email.status==EmailStatus.PENDING,Email.folder=="inbox")));sent=list(db.scalars(select(Email).where(Email.mailbox_id==mailbox.id,Email.folder=="sentitems")))
                 for received_mail in incoming:
                     received_mail.pending_hours=elapsed_hours(received_mail.received_time,datetime.now(timezone.utc),calendar,business_only);received_mail.sla_tier=tier_for(received_mail.pending_hours,thresholds or None)

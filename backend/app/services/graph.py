@@ -8,7 +8,7 @@ from app.core.config import Settings
 
 FOLDERS=("inbox","sentitems","deleteditems","archive")
 RESERVED_SCOPES={"openid","profile","offline_access"}
-ALLOWED_DELEGATED_SCOPES={"Mail.Read","User.Read"}
+ALLOWED_DELEGATED_SCOPES={"Mail.Read","Mail.Send","User.Read"}
 PERSONAL_MAIL_DOMAINS={"outlook.com","hotmail.com","live.com","msn.com"}
 def delegated_authority_tenant(address:str,settings:Settings)->str:
     domain=address.rsplit("@",1)[-1].lower()
@@ -19,11 +19,13 @@ def delegated_graph_application(settings:Settings,authority_tenant:str):
 def delegated_scopes(settings:Settings)->list[str]:
     scopes=[scope for scope in settings.graph_delegated_scopes.split() if scope not in RESERVED_SCOPES]
     if not scopes or not set(scopes)<=ALLOWED_DELEGATED_SCOPES or "Mail.Read" not in scopes:raise RuntimeError("Microsoft delegated scopes exceed OEIS allowlist")
-    return scopes
+    return [scope for scope in scopes if scope!="Mail.Send"]
 def delegated_auth_code_scopes(settings:Settings)->list[str]:
     # MSAL adds openid, profile, and offline_access itself. Passing them here
     # raises a reserved-scope ValueError before Microsoft login can start.
-    return delegated_scopes(settings)
+    scopes=delegated_scopes(settings)
+    scopes.append("Mail.Send")
+    return scopes
 def validate_graph_url(url:str,settings:Settings)->str:
     parsed=urlsplit(url);allowed={host.strip().lower() for host in settings.graph_allowed_hosts.split(",") if host.strip()}
     if parsed.scheme!="https" or (parsed.hostname or "").lower() not in allowed or parsed.port not in (None,443) or parsed.username or parsed.password:raise RuntimeError("Graph continuation URL was rejected")
@@ -91,6 +93,7 @@ class GraphDeltaSync(IMailSyncStrategy):
         if "access_token" not in result:raise RuntimeError(_token_error(result,"Graph token acquisition failed"))
         return result["access_token"]
     async def _token(self,force=False):return await asyncio.to_thread(self._token_sync,force)
+    async def _send_token(self):return await self._token()
     def _message_url(self,address:str,message_id:str)->str:
         return f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/messages/{quote(message_id,safe='')}?$select=body"
     async def message_content(self,address:str,message_id:str)->str:
@@ -102,6 +105,23 @@ class GraphDeltaSync(IMailSyncStrategy):
                 if response.status_code==429 and attempts<4:await asyncio.sleep(_retry_delay(response.headers.get("Retry-After"),attempts));attempts+=1;continue
                 if response.status_code>=400:raise RuntimeError(_graph_error(response))
                 return str(response.json().get("body",{}).get("content") or "")[:1_000_000]
+    async def send_reply(self,address:str,message_id:str,recipient:str,subject:str,body:str,internet_message_id:str|None=None,references:str|None=None,conversation_id:str|None=None)->None:
+        del recipient,subject,internet_message_id,references,conversation_id
+        token=await self._send_token();url=validate_graph_url(self._reply_url(address,message_id),self.settings)
+        async with httpx.AsyncClient(timeout=30,follow_redirects=False) as client:
+            response=await client.post(url,json={"comment":body},headers={"Authorization":f"Bearer {token}"})
+        if response.status_code>=400:raise RuntimeError(_graph_error(response))
+    async def send_html(self,address:str,recipient:str,subject:str,html:str)->None:
+        token=await self._send_token()
+        url=validate_graph_url(self._send_mail_url(address),self.settings)
+        payload={"message":{"subject":subject,"body":{"contentType":"HTML","content":html},"toRecipients":[{"emailAddress":{"address":recipient}}]},"saveToSentItems":True}
+        async with httpx.AsyncClient(timeout=30,follow_redirects=False) as client:
+            response=await client.post(url,json=payload,headers={"Authorization":f"Bearer {token}"})
+        if response.status_code>=400:raise RuntimeError(_graph_error(response))
+    def _send_mail_url(self,address:str)->str:
+        return f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/sendMail"
+    def _reply_url(self,address:str,message_id:str)->str:
+        return f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/messages/{quote(message_id,safe='')}/reply"
     async def _folder(self,client,address,folder,url,token):
         fields="id,conversationId,internetMessageId,conversationIndex,subject,from,toRecipients,receivedDateTime,sentDateTime,parentFolderId,internetMessageHeaders,categories";url=url or f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/mailFolders/{folder}/messages/delta?$select={fields}";items=[];refreshed=False;attempts=0;delta=url
         while url:
@@ -129,15 +149,22 @@ class DelegatedGraphDeltaSync(GraphDeltaSync):
         self.settings=settings;self.refresh_token=refresh_token;self.latest_refresh_token=refresh_token
         tenant=authority_tenant or settings.azure_tenant_id.strip() or "common"
         self.app=delegated_graph_application(settings,tenant)
-    def _token_sync(self,force=False):
-        scopes=delegated_scopes(self.settings)
+    def _token_sync(self,force=False,send=False):
+        scopes=delegated_auth_code_scopes(self.settings) if send else delegated_scopes(self.settings)
         result=_with_token_retry(lambda: self.app.acquire_token_by_refresh_token(self.refresh_token,scopes=scopes),"Delegated Graph token refresh failed")
         if "refresh_token" in result:self.latest_refresh_token=result["refresh_token"]
         if "access_token" not in result:raise RuntimeError(_token_error(result,"Delegated Graph token refresh failed"))
         return result["access_token"]
+    async def _send_token(self):return await asyncio.to_thread(self._token_sync,False,True)
+    def _send_mail_url(self,address:str)->str:
+        del address
+        return "https://graph.microsoft.com/v1.0/me/sendMail"
     def _message_url(self,address:str,message_id:str)->str:
         del address
         return f"https://graph.microsoft.com/v1.0/me/messages/{quote(message_id,safe='')}?$select=body"
+    def _reply_url(self,address:str,message_id:str)->str:
+        del address
+        return f"https://graph.microsoft.com/v1.0/me/messages/{quote(message_id,safe='')}/reply"
     async def _folder(self,client,address,folder,url,token):
         fields="id,conversationId,internetMessageId,conversationIndex,subject,from,toRecipients,receivedDateTime,sentDateTime,parentFolderId,internetMessageHeaders,categories";url=url or f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages/delta?$select={fields}";items=[];attempts=0;delta=url
         while url:

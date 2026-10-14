@@ -10,7 +10,7 @@ from app.core.database import Base,SessionLocal,engine
 from app.core.security import hash_password
 from app.models.entities import Classification,ClassificationRule,Role,SLARule,SLATier,User
 from app.services.content import seed_ui_content
-from app.services.jobs import daily_summary_job,sync_job
+from app.services.jobs import conversation_ai_review_job,daily_summary_job,sync_job
 from app.services.scheduler import build_scheduler
 from app.services.secrets import migrate_mailbox_token
 from app.models.entities import Mailbox
@@ -32,6 +32,8 @@ async def lifespan(app:FastAPI):
     if not settings.production:Base.metadata.create_all(engine)
     if settings.database_url.startswith("sqlite"):
         with engine.begin() as conn:
+            employee_columns={row[1] for row in conn.execute(text("PRAGMA table_info(employees)"))}
+            if "department" not in employee_columns:conn.execute(text("ALTER TABLE employees ADD COLUMN department VARCHAR(120) NOT NULL DEFAULT 'General'"))
             columns={row[1] for row in conn.execute(text("PRAGMA table_info(mailboxes)"))}
             if "graph_auth_type" not in columns:conn.execute(text("ALTER TABLE mailboxes ADD COLUMN graph_auth_type VARCHAR(20) DEFAULT 'application' NOT NULL"))
             if "graph_refresh_token" not in columns:conn.execute(text("ALTER TABLE mailboxes ADD COLUMN graph_refresh_token TEXT"))
@@ -53,7 +55,7 @@ async def lifespan(app:FastAPI):
         db.commit()
     scheduler=None
     if settings.scheduler_enabled:
-        scheduler=build_scheduler(sync_job,daily_summary_job);scheduler.start()
+        scheduler=build_scheduler(sync_job,daily_summary_job,conversation_ai_review_job);scheduler.start()
     app.state.scheduler=scheduler
     yield
     if scheduler:scheduler.shutdown(wait=False)

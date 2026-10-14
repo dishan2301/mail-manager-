@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
 from html.parser import HTMLParser
 
@@ -15,7 +16,7 @@ API = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 FOLDERS = (("inbox", "INBOX", None), ("sentitems", "SENT", None), ("deleteditems", "TRASH", None), ("archive", None, "-in:inbox -in:sent -in:trash -in:spam"))
 METADATA_HEADERS = ("From", "To", "Subject", "Date", "Message-ID", "In-Reply-To", "References")
-ALLOWED_SCOPES = {"https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/userinfo.email", "openid"}
+ALLOWED_SCOPES = {"https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/userinfo.email", "openid"}
 
 
 class _HTMLText(HTMLParser):
@@ -34,12 +35,22 @@ def _decode_body(data: str) -> str:
 class GmailAPIError(RuntimeError):
     def __init__(self, response: httpx.Response):
         self.status_code = response.status_code
-        super().__init__(f"Gmail request failed ({response.status_code})")
+        self.reason = ""
+        try:
+            payload = response.json()
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            self.reason = str(error.get("message") or error.get("status") or "").strip()
+        except (ValueError, TypeError):
+            self.reason = response.text[:240].strip()
+        detail = f": {self.reason}" if self.reason else ""
+        super().__init__(f"Gmail request failed ({response.status_code}){detail}")
 
 
 def gmail_scopes(settings: Settings) -> list[str]:
     scopes=settings.gmail_scopes.split()
-    if not set(scopes)<=ALLOWED_SCOPES or "https://www.googleapis.com/auth/gmail.readonly" not in scopes or "https://www.googleapis.com/auth/userinfo.email" not in scopes:raise RuntimeError("Gmail scopes exceed OEIS allowlist")
+    required={"https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/userinfo.email"}
+    if not set(scopes)<=ALLOWED_SCOPES or not required<=set(scopes):raise RuntimeError("Gmail scopes exceed OEIS allowlist")
+    if "https://www.googleapis.com/auth/gmail.send" not in scopes:scopes.append("https://www.googleapis.com/auth/gmail.send")
     return scopes
 
 
@@ -137,6 +148,20 @@ class GmailDeltaSync(IMailSyncStrategy):
             if not content and html:
                 parser=_HTMLText();parser.feed("\n\n".join(html));content=parser.text()
             return content[:1_000_000]
+
+    async def send_reply(self,address:str,message_id:str,recipient:str,subject:str,body:str,internet_message_id:str|None=None,references:str|None=None,conversation_id:str|None=None)->None:
+        del message_id
+        message=EmailMessage();message["From"]=address;message["To"]=recipient;message["Subject"]=subject
+        if internet_message_id:message["In-Reply-To"]=internet_message_id
+        reference_values=[*(references or "").split(),*( [internet_message_id] if internet_message_id else [])]
+        if reference_values:message["References"]=" ".join(dict.fromkeys(reference_values))
+        message.set_content(body)
+        payload={"raw":base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")}
+        if conversation_id:payload["threadId"]=conversation_id
+        if not self.access_token:await self._token()
+        async with httpx.AsyncClient(timeout=30,follow_redirects=False) as client:
+            response=await client.post(f"{API}/messages/send",json=payload,headers={"Authorization":f"Bearer {self.access_token}"})
+        if response.status_code>=400:raise GmailAPIError(response)
 
     async def _list(self, client: httpx.AsyncClient, label: str | None, query: str | None) -> list[str]:
         ids = []

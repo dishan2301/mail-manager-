@@ -25,8 +25,7 @@ def _origin_variants(value:str)->set[str]:
     parsed=urlparse(value)
     if not parsed.scheme or not parsed.netloc:return set()
     hosts={parsed.hostname or ""}
-    if parsed.hostname=="localhost":hosts.add("127.0.0.1")
-    if parsed.hostname=="127.0.0.1":hosts.add("localhost")
+    if parsed.hostname in {"localhost","127.0.0.1","0.0.0.0"}:hosts.update({"localhost","127.0.0.1","0.0.0.0"})
     port=f":{parsed.port}" if parsed.port else ""
     return {f"{parsed.scheme}://{host}{port}" for host in hosts if host}
 
@@ -38,9 +37,16 @@ def audit(db:Session,request:Request|None,action:str,outcome:str,actor_user_id:i
 
 def validate_cookie_origin(request:Request)->None:
     if request.headers.get("sec-fetch-site","").lower()=="cross-site":raise HTTPException(status.HTTP_403_FORBIDDEN,"Cross-site request rejected")
+    if not get_settings().production:return
     origin=request.headers.get("origin")
     if not origin:return
     settings=get_settings();allowed=set().union(*(_origin_variants(value) for value in (settings.frontend_url,settings.dashboard_url)))
+    if not settings.production:
+        parsed_origin=urlparse(origin)
+        if parsed_origin.scheme == "http" and parsed_origin.hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
+            return
+        for port in (5173, 8080, 10000):
+            allowed.update({f"http://localhost:{port}", f"http://127.0.0.1:{port}"})
     if origin.rstrip("/") not in allowed:raise HTTPException(status.HTTP_403_FORBIDDEN,"Request origin rejected")
 
 

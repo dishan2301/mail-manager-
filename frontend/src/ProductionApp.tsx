@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
+import { GitHubCalendar } from "./components/ui/git-hub-calendar";
 import type { FormEvent, ReactNode } from "react";
-import { Bar, Doughnut } from "react-chartjs-2";
+import { Bar, Doughnut, Line } from "react-chartjs-2";
 import {
   ArcElement,
   BarElement,
   CategoryScale,
   Chart as ChartJS,
   Legend,
+  LineElement,
+  PointElement,
+  Filler,
   LinearScale,
   Tooltip,
 } from "chart.js";
@@ -38,11 +42,14 @@ import {
 import {
   Assessment,
   Add,
+  AutoFixHigh,
+  AutoAwesome,
   ArrowForward,
   Bolt,
   CheckCircleOutline,
   Close,
   ContentCopy,
+  Edit,
   Dashboard,
   Delete,
   Email,
@@ -57,6 +64,7 @@ import {
   Menu as MenuIcon,
   OpenInNew,
   Search,
+  Send,
   Schedule,
   ShieldOutlined,
   Settings,
@@ -73,6 +81,9 @@ ChartJS.register(
   CategoryScale,
   LinearScale,
   Legend,
+  LineElement,
+  PointElement,
+  Filler,
   Tooltip,
 );
 const sections: { name: string; description: string; icon: ReactNode }[] = [
@@ -85,7 +96,9 @@ const sections: { name: string; description: string; icon: ReactNode }[] = [
   { name: "Audit Logs", description: "", icon: <History /> },
   { name: "Users & Roles", description: "", icon: <Groups /> },
   { name: "Settings", description: "", icon: <Settings /> },
+  { name: "AI Settings", description: "Choose provider and model", icon: <AutoAwesome /> },
 ];
+const departments = ["Sales", "Support", "HRMS"];
 const sectionMeta: Record<string, { eyebrow: string; description: string }> = {};
 const emptyStateMeta: Record<string, { title: string; description: string }> = {};
 const tourTargets: Record<string, string> = {
@@ -97,6 +110,7 @@ const tourTargets: Record<string, string> = {
   "Audit Logs": "audit-nav",
   "Users & Roles": "users-nav",
   Settings: "settings-nav",
+  "AI Settings": "ai-settings-nav",
 };
 const sectionContentKeys: Record<string, string> = {
   Dashboard: "dashboard",
@@ -108,6 +122,7 @@ const sectionContentKeys: Record<string, string> = {
   "Audit Logs": "audit",
   "Users & Roles": "users",
   Settings: "settings",
+  "AI Settings": "ai_settings",
 };
 const tourStepKeys = [
   ["workspace", "workspace"],
@@ -126,6 +141,7 @@ const tourStepKeys = [
   ["help", "help"],
 ] as const;
 const initialQuery = new URLSearchParams(location.search);
+const initialView = initialQuery.get("view");
 function tokenRole(token: string) {
   try {
     const value = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
@@ -167,17 +183,35 @@ function formatMailboxDateTime(value: unknown, timeZone?: string) {
   if (!value) return "—";
   const date = new Date(String(value));
   if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-IN", {
     timeZone: timeZone || "Asia/Kolkata",
-    dateStyle: "medium",
+    dateStyle: "short",
     timeStyle: "short",
   }).format(date);
+}
+function localDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+function formatIndiaDate(value: string, options: Intl.DateTimeFormatOptions = {}) {
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", ...options }).format(date);
 }
 let refreshInFlight: Promise<string | null> | null = null;
 function refreshAccessToken() {
   if (!refreshInFlight) {
-    refreshInFlight = fetch("/api/auth/refresh", { method: "POST" })
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    refreshInFlight = fetch("/api/auth/refresh", { method: "POST", signal: controller.signal })
       .then(async (response) => response.ok ? (await response.json()).access_token : null)
+      .catch(() => null)
+      .finally(() => window.clearTimeout(timeout))
       .finally(() => { refreshInFlight = null; });
   }
   return refreshInFlight;
@@ -207,24 +241,41 @@ async function api(path: string, token: string, options: RequestInit = {}) {
   }
   if (!r.ok) {
     const contentType = r.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      redirectToProductionDashboard();
+      throw new Error("Wrong OEIS server opened. Opening the production dashboard…");
+    }
     const e = contentType.includes("application/json")
       ? await r.json().catch(() => ({}))
       : {};
     throw new Error(
-      apiErrorMessage(e.detail,
-        (contentType.includes("text/html")
-          ? "Wrong OEIS server opened. Use the production dashboard URL."
-          : `Request failed (${r.status})`),
-      ),
+      apiErrorMessage(e.detail, `Request failed (${r.status})`),
     );
   }
   if (r.status === 204) return null;
   if (!(r.headers.get("content-type") || "").includes("application/json")) {
-    throw new Error(
-      "Wrong OEIS server opened. Redirecting to the production dashboard fixes this response.",
-    );
+    redirectToProductionDashboard();
+    throw new Error("Wrong OEIS server opened. Opening the production dashboard…");
   }
   return r.json();
+}
+function redirectToProductionDashboard() {
+  const configured = import.meta.env.VITE_DASHBOARD_URL ||
+    (import.meta.env.VITE_VERCEL_PROJECT_PRODUCTION_URL
+      ? `https://${import.meta.env.VITE_VERCEL_PROJECT_PRODUCTION_URL}`
+      : "");
+  const localWrongServer = ["8000", "10000"].includes(window.location.port) &&
+    ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  const destination = configured || (localWrongServer
+    ? `${window.location.protocol}//${window.location.hostname}:8080`
+    : "");
+  if (!destination) return;
+  const target = new URL(destination, window.location.origin);
+  if (target.origin === window.location.origin) return;
+  target.pathname = "/";
+  target.search = window.location.search;
+  target.hash = window.location.hash;
+  window.location.replace(target.toString());
 }
 function OeisLogo({ compact = false }: { compact?: boolean }) {
   const { text } = useContent();
@@ -487,17 +538,21 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
 function DataTable({
   rows,
   onSelect,
+  onEdit,
   onDelete,
   onConnect,
   emptyTitle,
   emptyDescription,
+  dimensionLabel,
 }: {
   rows: any[];
   onSelect?: (row: any) => void;
+  onEdit?: (row: any) => void;
   onDelete?: (row: any) => void;
   onConnect?: (row: any) => void;
   emptyTitle?: string;
   emptyDescription?: string;
+  dimensionLabel?: string;
 }) {
   const { format, text } = useContent();
   if (!rows.length)
@@ -509,7 +564,7 @@ function DataTable({
       </Box>
     );
   const columns = Object.keys(rows[0]).filter(
-    (column) => (column !== "id" || !("serial_number" in rows[0])) && column !== "mailbox_timezone",
+    (column) => (column !== "id" || !("serial_number" in rows[0])) && column !== "mailbox_timezone" && column !== "employee_id",
   );
   return (
     <Box
@@ -523,12 +578,12 @@ function DataTable({
           <tr>
             {columns.map((c) => (
               <th scope="col" key={c}>
-                {c
+                {c === "dimension" && dimensionLabel ? dimensionLabel : c
                   .replaceAll("_", " ")
                   .replace(/\b\w/g, (letter) => letter.toUpperCase())}
               </th>
             ))}
-            {(onConnect || onDelete) && <th scope="col">{text("table.actions")}</th>}
+            {(onConnect || onEdit || onDelete) && <th scope="col">{text("table.actions")}</th>}
           </tr>
         </thead>
         <tbody>
@@ -558,7 +613,9 @@ function DataTable({
                     />
                   ) : typeof r[c] === "object" ? (
                     JSON.stringify(r[c])
-                  ) : /(date|time|received|created)/i.test(c) &&
+                  ) : typeof r[c] === "number" ? (
+                    c === "reply_rate" ? `${r[c].toFixed(1)}%` : c === "average_reply_hours" ? `${r[c].toFixed(2)} h` : String(r[c])
+                  ) : typeof r[c] === "string" && /^\d{4}-\d{2}-\d{2}/.test(r[c]) && /(date|time|received|created|_at$)/i.test(c) &&
                     !Number.isNaN(Date.parse(String(r[c]))) ? (
                     formatMailboxDateTime(r[c], r.mailbox_timezone)
                   ) : /(status|priority|role|classification)/i.test(c) ? (
@@ -573,9 +630,21 @@ function DataTable({
                   )}
                 </td>
               ))}
-              {(onConnect || onDelete) && (
+              {(onConnect || onEdit || onDelete) && (
                 <td>
                   <Stack direction="row" spacing={1}>
+                    {onEdit && (
+                      <Button
+                        size="small"
+                        startIcon={<Edit />}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onEdit(r);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                    )}
                     {onConnect && (
                       <Button
                         size="small"
@@ -610,6 +679,18 @@ function DataTable({
       </table>
     </Box>
   );
+}
+
+function MailKanban({ rows, onSelect }: { rows: any[]; onSelect: (row: any) => void }) {
+  const columns = [
+    ["pending", "Awaiting reply"],
+    ["replied", "Replied"],
+    ["ignored", "Ignored"],
+  ] as const;
+  return <Box className="mail-kanban">{columns.map(([status, label]) => {
+    const items = rows.filter((row) => String(row.status).toLowerCase() === status);
+    return <Box className="kanban-column" key={status}><Box className="kanban-column-head"><b>{label}</b><Chip size="small" label={items.length} /></Box>{items.length ? items.map((row) => <Card className="kanban-card" key={row.id} onClick={() => onSelect(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(row); }}><Box className="kanban-card-top"><Chip size="small" label={row.priority || "Mail"} /><small>{row.read_at ? "Read" : "Unread"}</small></Box><b>{row.subject || "(no subject)"}</b><span>{row.from || row.email}</span><small>To: {row.to || row.mailbox}</small><Box className="kanban-card-foot"><span>{row.assigned_employee || "Unassigned"}</span><strong>{row.hours ? `${Number(row.hours).toFixed(1)}h` : "—"}</strong></Box></Card>) : <Typography className="kanban-empty" variant="body2">No mail in this stage</Typography>}</Box>;
+  })}</Box>;
 }
 const kpiMeta: Record<string, { label: string; note: string }> = {};
 type Readiness = {
@@ -652,29 +733,6 @@ type GraphSetup = {
   azure_cli_commands: string;
   exchange_policy_commands: string;
 };
-type GraphConfig = {
-  azure_tenant_id: string;
-  azure_client_id: string;
-  azure_client_secret: string;
-  graph_scope: string;
-};
-const GRAPH_APP_ONLY_SCOPE = "https://graph.microsoft.com/.default";
-function parseGraphConfig(setup: GraphSetup | null): GraphConfig {
-  const config: GraphConfig = {
-    azure_tenant_id: "",
-    azure_client_id: "",
-    azure_client_secret: "",
-    graph_scope: GRAPH_APP_ONLY_SCOPE,
-  };
-  for (const line of (setup?.env_template || "").split("\n")) {
-    const [key, ...rest] = line.split("=");
-    const value = rest.join("=");
-    if (key === "AZURE_TENANT_ID") config.azure_tenant_id = value;
-    if (key === "AZURE_CLIENT_ID") config.azure_client_id = value;
-    if (key === "GRAPH_SCOPE") config.graph_scope = value || config.graph_scope;
-  }
-  return config;
-}
 type GmailSetup = {
   gmail_configured: boolean;
   missing: string[];
@@ -696,8 +754,6 @@ function GraphSetupPipeline({
   onDownload,
   onTestGraph,
   testingGraph,
-  onSaveCredentials,
-  savingCredentials,
 }: {
   setup: GraphSetup | null;
   mailboxAddress: string;
@@ -705,12 +761,8 @@ function GraphSetupPipeline({
   onDownload: (value: string, filename: string) => void;
   onTestGraph: () => void;
   testingGraph: boolean;
-  onSaveCredentials: (value: GraphConfig) => Promise<void>;
-  savingCredentials: boolean;
 }) {
   const { format, text } = useContent();
-  const [config, setConfig] = useState<GraphConfig>(() => parseGraphConfig(setup));
-  useEffect(() => setConfig(parseGraphConfig(setup)), [setup]);
   if (!setup) {
     return (
       <Alert severity="info">
@@ -719,13 +771,16 @@ function GraphSetupPipeline({
     );
   }
   const personalMailbox = /@(outlook\.com|hotmail\.com|live\.com|msn\.com)$/i.test(mailboxAddress.trim());
+  const credentialsConfigured = personalMailbox
+    ? !!setup.delegated_setup?.oauth_configured
+    : !!setup.graph_configured;
   const steps = [
     {
       title: text("graph_ui.step.register.title"),
       detail: text("graph_ui.step.register.detail"),
       href: setup.portal_links.app_registration,
       label: text("graph_ui.step.register.action"),
-      done: !!setup.graph_configured,
+      done: credentialsConfigured,
     },
     {
       title: personalMailbox
@@ -736,7 +791,7 @@ function GraphSetupPipeline({
         : setup.required_permission,
       href: setup.portal_links.api_permissions,
       label: text("graph_ui.step.permission.action"),
-      done: !!setup.graph_configured,
+      done: credentialsConfigured,
     },
     {
       title: personalMailbox
@@ -772,7 +827,7 @@ function GraphSetupPipeline({
         <Box>
           <Typography fontWeight={800}>{text("graph_ui.title")}</Typography>
           <Typography variant="body2" color="text.secondary">
-            {setup.graph_configured
+            {credentialsConfigured
               ? personalMailbox
                 ? text("graph_ui.personal_configured")
                 : text("graph_ui.configured")
@@ -854,31 +909,24 @@ function GraphSetupPipeline({
         )}
         <Box>
           <Typography fontWeight={700}>{text("graph_ui.save_title")}</Typography>
-          <Stack spacing={1}>
-            <Alert severity={setup.delegated_setup?.oauth_configured === false ? "error" : personalMailbox ? "info" : "warning"}>
-              {setup.delegated_setup?.oauth_configured === false
-                ? "Outlook Connect is not ready. Save the client secret Value from Entra App registration first."
-                : personalMailbox
-                  ? "This form saves credentials for delegated Outlook login. Add delegated Mail.Read and User.Read in Entra; OEIS requests offline_access automatically."
-                  : "This form saves Microsoft Graph application credentials for organization mailbox sync."}
-            </Alert>
-            <TextField label={text("graph_ui.tenant")} value={config.azure_tenant_id} onChange={(event) => setConfig((current) => ({ ...current, azure_tenant_id: event.target.value }))} helperText={personalMailbox ? "Use the Directory (tenant) ID from your Entra app registration." : "Use your Microsoft Entra tenant ID for app-only setup. Do not use `common` or `consumers` here."} />
-            <TextField label={text("graph_ui.client")} value={config.azure_client_id} onChange={(event) => setConfig((current) => ({ ...current, azure_client_id: event.target.value }))} helperText="Paste the Application (client) ID from the app registration overview." />
-            <TextField label={text("graph_ui.secret")} type="password" value={config.azure_client_secret} onChange={(event) => setConfig((current) => ({ ...current, azure_client_secret: event.target.value }))} helperText="Required for Outlook web login. Leave blank only to keep an existing secret." />
-            <TextField label={text("graph_ui.scope")} value={config.graph_scope} onChange={(event) => setConfig((current) => ({ ...current, graph_scope: event.target.value }))} helperText={personalMailbox ? `Keep ${GRAPH_APP_ONLY_SCOPE}; delegated login uses the scopes shown above.` : `Must be exactly ${GRAPH_APP_ONLY_SCOPE}`} />
-            <Button variant="contained" disabled={savingCredentials || !config.azure_client_id} onClick={() => onSaveCredentials(config)}>
-              {savingCredentials ? text("graph_ui.saving") : text("graph_ui.save")}
-            </Button>
-            {setup.graph_configured && !personalMailbox && (
-              <Button
-                variant="outlined"
-                disabled={testingGraph || savingCredentials}
-                onClick={onTestGraph}
-              >
-                {testingGraph ? text("graph_ui.testing") : text("graph_ui.test")}
-              </Button>
-            )}
-          </Stack>
+          <Alert severity="info">
+            Set AZURE_CLIENT_ID and AZURE_CLIENT_SECRET in your deployment secret manager, and set AZURE_TENANT_ID for organizational mailboxes. Restart the API after updating secrets. OEIS does not accept or store provider client secrets in this page.
+          </Alert>
+        </Box>
+        {setup.graph_configured && !personalMailbox && (
+          <Button
+            variant="outlined"
+            disabled={testingGraph}
+            onClick={onTestGraph}
+          >
+            {testingGraph ? text("graph_ui.testing") : text("graph_ui.test")}
+          </Button>
+        )}
+        <Box>
+          <Typography fontWeight={700}>{text("graph_ui.env_title")}</Typography>
+          <TextField value={setup.env_template} multiline minRows={4} fullWidth InputProps={{ readOnly: true }} />
+          <Button size="small" startIcon={<ContentCopy />} onClick={() => onCopy(setup.env_template, text("graph_ui.env_copied"))}>{text("graph_ui.copy_env")}</Button>
+          <Button size="small" onClick={() => onDownload(setup.env_template, "oeis-microsoft.env")}>{text("graph_ui.download_env")}</Button>
         </Box>
         {!personalMailbox && <Box>
           <Typography fontWeight={700}>{text("graph_ui.azure_title")}</Typography>
@@ -971,12 +1019,18 @@ function GmailSetupPipeline({
   setup,
   onCopy,
   onDownload,
+  onSaveCredentials,
 }: {
   setup: GmailSetup | null;
   onCopy: (value: string, label: string) => void;
   onDownload: (value: string, filename: string) => void;
+  onSaveCredentials: (clientId: string, clientSecret: string) => Promise<void>;
 }) {
   const { format, text } = useContent();
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   if (!setup) return <Alert severity="info">{text("gmail_ui.empty")}</Alert>;
   const steps = [
     ["project", text("gmail_ui.step.project.title"), text("gmail_ui.step.project.detail"), text("gmail_ui.step.project.action")],
@@ -1012,7 +1066,15 @@ function GmailSetupPipeline({
         ))}
         <Box>
           <Typography fontWeight={700}>{text("gmail_ui.save_title")}</Typography>
-          <Alert severity="info">Provider credentials must be injected through deployment secret management. OEIS never accepts or stores them from this page.</Alert>
+          <Alert severity="info">Enter the Google OAuth credentials here. They are saved in the backend environment and the secret is never displayed again.</Alert>
+          <Stack spacing={1} sx={{ mt: 1 }}>
+            <TextField label="Google OAuth Client ID" value={clientId} onChange={(e) => { setClientId(e.target.value); setSaved(false); }} fullWidth />
+            <TextField label="Google OAuth Client Secret" type="password" value={clientSecret} onChange={(e) => { setClientSecret(e.target.value); setSaved(false); }} fullWidth />
+            {saved && <Alert severity="success">Google credentials saved successfully.</Alert>}
+            <Button variant="outlined" disabled={saving || saved || !clientId.trim() || !clientSecret} onClick={async () => { setSaving(true); try { await onSaveCredentials(clientId, clientSecret); setClientSecret(""); setSaved(true); } finally { setSaving(false); } }}>
+              {saving ? "Saving…" : saved ? "Saved" : "Save Google credentials"}
+            </Button>
+          </Stack>
         </Box>
         <Box>
           <Typography fontWeight={700}>{text("gmail_ui.env_title")}</Typography>
@@ -1130,8 +1192,8 @@ function ProductionDashboard({
     {
       label: "Email notifications",
       detail: readiness?.smtp_configured
-        ? "SMTP delivery configured"
-        : "SMTP configuration pending",
+        ? "Report delivery available"
+        : "Connect Outlook or configure SMTP",
       complete: !!readiness?.smtp_configured,
       error: false,
     },
@@ -1380,12 +1442,22 @@ function ProductionDashboard({
 }
 function ReferenceDashboard({
   data,
+  employeePerformance,
+  employeeConnections,
+  replyRate,
+  growth,
+  insights,
   readiness,
   onNavigate,
   onSync,
   canSync,
 }: {
   data: Record<string, number>;
+  employeePerformance: any[];
+  employeeConnections: any[];
+  replyRate: { replied: number; pending: number; total_incoming: number; reply_rate: number };
+  growth: any[];
+  insights: { top_senders: any[] };
   readiness: Readiness | null;
   onNavigate: (section: string) => void;
   onSync: () => void;
@@ -1417,7 +1489,7 @@ function ReferenceDashboard({
     { label: "Mail integrations", detail: readiness?.integration_configured ? "Credentials detected" : "Configuration required", complete: !!readiness?.integration_configured, error: false },
     { label: "Mailbox scope", detail: readiness?.configured_mailboxes ? `${readiness.configured_mailboxes} mailbox configured` : "Add an organizational mailbox", complete: !!readiness?.configured_mailboxes, error: false },
     { label: "Verified synchronization", detail: readiness?.last_successful_sync ? new Date(readiness.last_successful_sync).toLocaleString() : readiness?.error_mailboxes ? "Latest attempt failed" : readiness?.warning_mailboxes ? "Latest attempt had temporary network issue" : "Waiting for first run", complete: !!readiness?.last_successful_sync, error: !!readiness?.error_mailboxes },
-    { label: "Email notifications", detail: readiness?.smtp_configured ? "SMTP delivery configured" : "SMTP configuration pending", complete: !!readiness?.smtp_configured, error: false },
+    { label: "Email notifications", detail: readiness?.smtp_configured ? "Report delivery available" : "Connect Outlook or configure SMTP", complete: !!readiness?.smtp_configured, error: false },
   ];
   const completed = activation.filter((item) => item.complete).length;
   const metrics = [
@@ -1434,6 +1506,12 @@ function ReferenceDashboard({
     { label: "Pending ownership", value: pending, tone: "pending" },
     { label: "Resolved today", value: resolved, tone: "resolved" },
   ];
+  const assignedTotal = employeePerformance.reduce((sum, row) => sum + Number(row.total || row.emails || 0), 0);
+  const topEmployees = employeePerformance.slice(0, 5);
+  const allInboxReplied = Number(replyRate.replied || 0);
+  const allInboxPending = Number(replyRate.pending || 0);
+  const allInboxTotal = allInboxReplied + allInboxPending;
+  const allInboxReplyRate = allInboxTotal ? Math.round((allInboxReplied / allInboxTotal) * 100) : 0;
   return (
     <Box className="reference-dashboard" aria-label={text("dashboard.live_aria")}>
       <Box className={`reference-posture posture-${integration.color}`} data-tour="readiness">
@@ -1469,9 +1547,10 @@ function ReferenceDashboard({
           <Box className="reference-activation-list">{activation.map((item, index) => <Box key={item.label}><i>{String(index + 1).padStart(2, "0")}</i><Box className={item.complete ? "ready" : item.error ? "blocked" : "waiting"}>{item.complete ? <CheckCircleOutline /> : item.error ? <ErrorOutline /> : <Schedule />}</Box><Box><b>{item.label}</b><small>{item.detail}</small></Box><em>{item.complete ? text("dashboard.ready") : item.error ? text("dashboard.blocked") : text("dashboard.pending")}</em></Box>)}</Box>
         </Card>
         <Card className="reference-progress">
-          <Box className="reference-card-head"><Box><span>{text("dashboard.system_progress")}</span><b>{text("dashboard.intelligence_online")}</b></Box></Box>
-          <Box className="reference-gauge" style={{ "--progress": `${(completed / 4) * 180}deg` } as React.CSSProperties}><Box><strong>{Math.round((completed / 4) * 100)}%</strong><small>{text("dashboard.controls_ready")}</small></Box></Box>
-          <Box className="reference-legend"><span><i />{text("dashboard.ready")}</span><span><i />{text("dashboard.pending")}</span><span><i />{text("dashboard.blocked")}</span></Box>
+          <Box className="reference-card-head"><Box><span>ALL TIME · ALL MAILBOXES</span><b>Overall reply rate</b></Box></Box>
+          <Box className="reference-gauge" style={{ "--progress": `${(allInboxReplyRate / 100) * 180}deg` } as React.CSSProperties}><Box><strong>{allInboxReplyRate}%</strong><small>reply rate</small></Box></Box>
+          <Box className="reference-legend"><span><i />{allInboxReplied} replied</span><span><i />{allInboxTotal} received</span></Box>
+          <small className="reply-rate-caption">{allInboxReplied} replied out of {allInboxTotal} incoming emails across accessible mailboxes; ignored mail is excluded.</small>
         </Card>
         <Card className="reference-sync">
           <Box className="sync-rings" aria-hidden="true" />
@@ -1479,6 +1558,23 @@ function ReferenceDashboard({
           <strong>{new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</strong>
           <small>{readiness?.last_successful_sync ? new Date(readiness.last_successful_sync).toLocaleString() : text("shell.delta_interval")}</small>
           {canSync ? <Button data-tour="sync" onClick={onSync} startIcon={<Sync />}>{text("top.sync_now")}</Button> : <Button onClick={() => onNavigate("Audit Logs")}>{text("dashboard.view_evidence")}</Button>}
+        </Card>
+        <Card className="reference-mail-tracker">
+          <Box className="reference-card-head"><Box><span>MAIL TRACKER</span><b>Ownership & response flow</b></Box><Button size="small" onClick={() => onNavigate("Employee Performance")}>Details</Button></Box>
+          <Box className="tracker-statuses">
+            {[{ label: "Incoming", value: Number(data.today_emails || 0), tone: "in" }, { label: "Awaiting reply", value: pending, tone: "pending" }, { label: "Replied", value: resolved, tone: "resolved" }, { label: "Ignored", value: Number(data.ignored_emails || 0), tone: "ignored" }].map((item) => <Box className="tracker-status" title={`${item.label}: ${item.value}`} key={item.label}><i className={item.tone} /><strong>{item.value}</strong><small>{item.label}</small></Box>)}
+          </Box>
+          <Typography className="tracker-caption">{assignedTotal} tracked messages connected to employees</Typography>
+          <Box className="tracker-people">{topEmployees.length ? topEmployees.map((row, index) => <Box key={row.employee || row.name || index} title={`${row.employee || row.name}: ${Number(row.pending || 0)} pending, ${Number(row.resolved || row.replied || 0)} resolved`}><span>{String(row.employee || row.name || "Employee").slice(0, 18)}</span><LinearProgress variant="determinate" value={Math.min(100, (Number(row.total || row.emails || 0) / Math.max(1, assignedTotal)) * 100)} /><b>{Number(row.total || row.emails || 0)}</b></Box>) : <Typography variant="body2" color="text.secondary">Employee ownership appears after performance data is available.</Typography>}</Box>
+          {employeeConnections.length > 0 && <Box className="tracker-connections"><Typography variant="caption">Top mail connections</Typography>{employeeConnections.slice(0, 4).map((link) => <Box key={`${link.sender}-${link.employee}`} title={`${link.sender} → ${link.employee}`}><span>{String(link.sender).slice(0, 24)}</span><ArrowForward /><b>{link.employee}</b><small>{link.pending} pending · {link.replied} replied</small></Box>)}</Box>}
+        </Card>
+        <Card className="reference-growth">
+          <Box className="reference-card-head"><Box><span>GROWTH TRACKER</span><b>14-day mail flow</b></Box><small>Incoming vs. resolved</small></Box>
+          <Box className="growth-line-chart" aria-label="Fourteen day incoming, replied, pending and ignored mail trend"><Line data={{ labels: growth.map((day) => day.date.slice(5)), datasets: [{ label: "Incoming", data: growth.map((day) => day.incoming), borderColor: "#3b82f6", backgroundColor: "rgba(59,130,246,.10)", fill: true, tension: .35 }, { label: "Replied", data: growth.map((day) => day.replied), borderColor: "#10b981", backgroundColor: "transparent", tension: .35 }, { label: "Pending", data: growth.map((day) => day.pending), borderColor: "#f59e0b", backgroundColor: "transparent", tension: .35 }, { label: "Ignored", data: growth.map((day) => day.ignored), borderColor: "#94a3b8", backgroundColor: "transparent", tension: .35 }] }} options={{ responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false }, plugins: { legend: { position: "bottom" } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: "#e8eef5" } }, x: { grid: { display: false } } } }} /></Box>
+        </Card>
+        <Card className="reference-insights">
+          <Box className="reference-card-head"><Box><span>SENDER INTELLIGENCE</span><b>Who sends the most mail?</b></Box><Button size="small" onClick={() => onNavigate("Reports")}>Reports</Button></Box>
+          <Box className="sender-insights">{insights.top_senders.length ? insights.top_senders.slice(0, 6).map((sender) => <Box key={sender.sender} title={`${sender.sender}: ${sender.replied} replied of ${sender.total} total`}><Box className="sender-label"><span>{String(sender.sender).slice(0, 28)}</span><b>{sender.total}</b></Box><LinearProgress variant="determinate" value={Math.min(100, sender.total / Math.max(1, insights.top_senders[0].total) * 100)} /><Box className="sender-meta"><small>{sender.replied} replied · {sender.pending} pending · {sender.ignored} ignored</small><strong>{sender.reply_rate}% reply rate</strong></Box></Box>) : <Typography variant="body2" color="text.secondary">Sender insights appear after mail is synchronized.</Typography>}</Box>
         </Card>
       </Box>
     </Box>
@@ -1890,14 +1986,41 @@ function SyncSettingsPanel({
     </Box>
   );
 }
+function VisualCoachingReview({ review }: { review: any }) {
+  const factors = [
+    { key: "professionalism", label: "Professional tone" },
+    { key: "detail", label: "Answer detail" },
+    { key: "clarity", label: "Clarity" },
+    { key: "ownership", label: "Follow-through" },
+    { key: "actionability", label: "Actionable next step" },
+  ].map(({ key, label }) => {
+    const item = review.rubric?.[key];
+    return { key, label, score: typeof item?.score === "number" ? item.score as number : null, reason: String(item?.reason || "No reply evidence available") };
+  });
+  const scored = factors.filter((factor) => factor.score !== null).sort((a, b) => (a.score ?? 0) - (b.score ?? 0));
+  const focus = scored[0]?.score !== null && (scored[0]?.score ?? 100) < 80 ? scored[0] : null;
+  const strength = scored.length > 1 && (scored[scored.length - 1].score ?? 0) >= 60 ? scored[scored.length - 1] : null;
+  return <Box className="coaching-visual-review">
+    <Box className="coaching-brief"><Box><span className="coaching-eyebrow">CONVERSATION SNAPSHOT</span><strong>{scored.length ? `${scored.length} of 5 quality areas assessed` : "Reply quality cannot be assessed yet"}</strong><small>{scored.length ? `${5 - scored.length} areas remain unscored where evidence is missing.` : "No attributable reply evidence is available for scoring."}</small></Box><Box className="coaching-coverage" role="img" aria-label={`${scored.length} of 5 quality areas assessed`}>{factors.map((factor) => <span key={factor.key} className={factor.score === null ? "unscored" : factor.score < 60 ? "attention" : "assessed"} />)}</Box></Box>
+    <Box className="coaching-factor-grid">{factors.map((factor) => <Box key={factor.key} className={`coaching-factor ${factor.score === null ? "is-unscored" : factor.score < 60 ? "needs-attention" : ""}`}><Box className="coaching-factor-top"><strong>{factor.label}</strong><b>{factor.score === null ? "Unscored" : `${factor.score}/100`}</b></Box><Box className="coaching-factor-track" role="meter" aria-label={factor.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={factor.score ?? undefined} aria-valuetext={factor.score === null ? "Unscored" : `${factor.score} out of 100`}><span style={{ width: `${factor.score ?? 0}%` }} /></Box><small>{factor.reason}</small></Box>)}</Box>
+    {(focus || strength) && <Box className="coaching-takeaways">{focus && <Box className="coaching-takeaway focus"><span>COACHING PRIORITY</span><strong>{focus.label}</strong><p>{focus.reason}</p></Box>}{strength && <Box className="coaching-takeaway strength"><span>STRONGEST OBSERVED AREA</span><strong>{strength.label}</strong><p>{strength.reason}</p></Box>}</Box>}
+    <details className="coaching-source"><summary>Open full review and source evidence</summary><Box className="coaching-source-body">{String(review.analysis || "No review text recorded.")}</Box></details>
+  </Box>;
+}
+
 export default function ProductionApp() {
   const { format, text } = useContent();
   const [token, setToken] = useState(""),
     [authChecking, setAuthChecking] = useState(true),
     [section, setSection] = useState(
-      initialQuery.get("view") === "pending" ? "Pending Emails" : "Dashboard",
+      initialView === "employee" ? "Employee Performance" : initialView === "pending" ? "Pending Emails" : sections.some((item) => item.name === initialView) ? initialView! : "Dashboard",
     ),
     [data, setData] = useState<any>(null),
+    [employeePerformance, setEmployeePerformance] = useState<any[]>([]),
+    [employeeConnections, setEmployeeConnections] = useState<any[]>([]),
+    [replyRate, setReplyRate] = useState({ replied: 0, pending: 0, total_incoming: 0, reply_rate: 0 }),
+    [growth, setGrowth] = useState<any[]>([]),
+    [insights, setInsights] = useState<{ top_senders: any[] }>({ top_senders: [] }),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(false),
     [mobile, setMobile] = useState(false),
@@ -1914,6 +2037,29 @@ export default function ProductionApp() {
     [mailboxes, setMailboxes] = useState<any[]>([]),
     [employees, setEmployees] = useState<any[]>([]),
     [selectedEmail, setSelectedEmail] = useState<any>(null),
+    [selectedEmployee, setSelectedEmployee] = useState<any>(null),
+    [aiReviewOpen, setAiReviewOpen] = useState(false),
+    [aiReviewConsent, setAiReviewConsent] = useState(false),
+    [aiReviewBusy, setAiReviewBusy] = useState(false),
+    [aiReviewEmployeeId, setAiReviewEmployeeId] = useState(""),
+    [aiReviewPage, setAiReviewPage] = useState(1),
+    [aiReviewResult, setAiReviewResult] = useState<any>(null),
+    [senderReport, setSenderReport] = useState<any>(null),
+    [aiReviewEnabled, setAiReviewEnabled] = useState(false),
+    [aiProviderConfigured, setAiProviderConfigured] = useState(false),
+    [aiSchedulerEnabled, setAiSchedulerEnabled] = useState(true),
+    [employeeTrend, setEmployeeTrend] = useState<any[]>([]),
+    [employeeHistory, setEmployeeHistory] = useState<any[]>([]),
+    [employeeHourly, setEmployeeHourly] = useState<any[]>([]),
+    [employeeDailySenders, setEmployeeDailySenders] = useState<any[]>([]),
+    [employeeHourlyDate, setEmployeeHourlyDate] = useState(() => localDateKey()),
+    [employeeSelectedDate, setEmployeeSelectedDate] = useState(() => localDateKey()),
+    [employeePeriod, setEmployeePeriod] = useState("rolling"),
+    [employeeReportPeriod, setEmployeeReportPeriod] = useState("daily"),
+    [employeeMailReport, setEmployeeMailReport] = useState<any>(null),
+    [replyDraft, setReplyDraft] = useState(""),
+    [replyBusy, setReplyBusy] = useState(false),
+    [assistantMode, setAssistantMode] = useState<"draft" | "correct" | "rewrite" | "">(""),
     [notice, setNotice] = useState(""),
     [createDialog, setCreateDialog] = useState<"employee" | "user" | null>(
       null,
@@ -1922,6 +2068,7 @@ export default function ProductionApp() {
     [person, setPerson] = useState({
       name: "",
       email: "",
+      department: "General",
       password: "",
       role: "manager",
       active: true,
@@ -1939,16 +2086,19 @@ export default function ProductionApp() {
     ),
     [page, setPage] = useState(Number(initialQuery.get("page")) || 1),
     [settingsView, setSettingsView] = useState("sla-rules"),
+    [aiConfig, setAiConfig] = useState<{provider:string;model:string;configured:Record<string,boolean>;models:Record<string,Record<string,string>>}|null>(null),
+    [aiKey, setAiKey] = useState(""),
+    [savingAiConfig, setSavingAiConfig] = useState(false),
     [reportPeriod, setReportPeriod] = useState("daily"),
-    [reportDimension, setReportDimension] = useState("mailbox"),
+    [reportDimension, setReportDimension] = useState("department"),
     [performanceSort, setPerformanceSort] = useState("employee"),
     [performanceOrder, setPerformanceOrder] = useState("asc"),
+    [pendingView, setPendingView] = useState<"table" | "board">("table"),
     [settingsJson, setSettingsJson] = useState("[]"),
     [readiness, setReadiness] = useState<Readiness | null>(null),
     [graphSetup, setGraphSetup] = useState<GraphSetup | null>(null),
     [gmailSetup, setGmailSetup] = useState<GmailSetup | null>(null),
     [testingGraph, setTestingGraph] = useState(false),
-    [savingGraphCredentials, setSavingGraphCredentials] = useState(false),
     [syncSettings, setSyncSettings] = useState<SyncSettings>({ interval_seconds: 10, scheduler_enabled: true, next_sync: null }),
     [savingSyncSettings, setSavingSyncSettings] = useState(false),
     [syncing, setSyncing] = useState(false),
@@ -1963,12 +2113,20 @@ export default function ProductionApp() {
     visibleSections = sections.filter(
       (item) =>
         role === "admin" ||
-        !["Mailboxes", "Users & Roles", "Settings"].includes(item.name),
+        !["Mailboxes", "Users & Roles", "Settings", "AI Settings"].includes(item.name),
     );
   const displayName = (name: string) =>
     text(`nav.${sectionContentKeys[name]}.name`, name);
   const displayDescription = (name: string, fallback: string) =>
     text(`nav.${sectionContentKeys[name]}.description`, fallback);
+  const navigateSection = (name: string) => {
+    if (location.search !== `?view=${encodeURIComponent(name)}`)
+      history.pushState(null, "", `?view=${encodeURIComponent(name)}`);
+    setSelectedEmployee(null);
+    setSection(name);
+    setPage(1);
+    setMobile(false);
+  };
   const pageEyebrow = (name: string) =>
     text(`page.${sectionContentKeys[name]}.eyebrow`, sectionMeta[name]?.eyebrow);
   const pageDescription = (name: string) =>
@@ -2015,14 +2173,36 @@ export default function ProductionApp() {
         "Audit Logs": "/audit-logs",
         "Users & Roles": "/users",
         Settings: settingsView === "synchronization" ? "/system/sync-settings" : `/settings/${settingsView}`,
+        "AI Settings": "/settings/ai-provider",
       };
       if (section === "Dashboard") {
-        const [kpis, health] = await Promise.all([
+        const [kpis, health, performance, connections, growthData, insightsData, rateData] = await Promise.all([
           api(paths[section], token),
           api("/system/readiness", token),
+          api("/employees/performance?sort_by=total&order=desc", token),
+          api("/employees/connections", token),
+          api("/dashboard/growth", token),
+          api("/dashboard/insights", token),
+          api("/employees/reply-rate", token),
         ]);
         setData(kpis);
         setReadiness(health);
+        setEmployeePerformance(Array.isArray(performance) ? performance : performance?.rows || []);
+        setEmployeeConnections(Array.isArray(connections) ? connections : []);
+        setGrowth(Array.isArray(growthData) ? growthData : []);
+        setInsights(insightsData?.top_senders ? insightsData : { top_senders: [] });
+        setReplyRate(rateData);
+      } else if (section === "Reports") {
+        const [reportData, aiStatus, health] = await Promise.all([api(paths[section], token), api("/reports/ai-review/status", token), api("/system/readiness", token)]);
+        setData(reportData);
+        setReadiness(health);
+        setAiReviewEnabled(!!aiStatus.enabled);
+        setAiProviderConfigured(!!aiStatus.provider_configured);
+        setAiSchedulerEnabled(!!aiStatus.scheduler_enabled);
+      } else if (section === "AI Settings") {
+        const config = await api(paths[section], token);
+        setAiConfig(config);
+        setData(config);
       } else setData(await api(paths[section], token));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load");
@@ -2080,11 +2260,32 @@ export default function ProductionApp() {
       Promise.all([
         api("/dashboard/kpis", token),
         api("/system/readiness", token),
+        api("/employees/performance?sort_by=total&order=desc", token),
+        api("/employees/connections", token),
+        api("/dashboard/growth", token),
+        api("/dashboard/insights", token),
+        api("/employees/reply-rate", token),
       ])
-        .then(([kpis, health]) => {
+        .then(([kpis, health, performance, connections, growthData, insightsData, rateData]) => {
           setData(kpis);
           setReadiness(health);
+          setEmployeePerformance(Array.isArray(performance) ? performance : performance?.rows || []);
+          setEmployeeConnections(Array.isArray(connections) ? connections : []);
+          setGrowth(Array.isArray(growthData) ? growthData : []);
+          setInsights(insightsData?.top_senders ? insightsData : { top_senders: [] });
+          setReplyRate(rateData);
         })
+        .catch(() => undefined);
+    };
+    const delay = Math.max(5000, Math.min(syncSettings.interval_seconds * 1000, 60000));
+    const timer = window.setInterval(refresh, delay);
+    return () => window.clearInterval(timer);
+  }, [token, section, syncSettings.interval_seconds]);
+  useEffect(() => {
+    if (!token || section !== "Audit Logs") return;
+    const refresh = () => {
+      api("/audit-logs", token)
+        .then(setData)
         .catch(() => undefined);
     };
     const delay = Math.max(5000, Math.min(syncSettings.interval_seconds * 1000, 60000));
@@ -2098,7 +2299,7 @@ export default function ProductionApp() {
       setSyncSettings(data as SyncSettings);
   }, [section, settingsView, data]);
   useEffect(() => {
-    if (!dialog || editingMailboxId || !token) return;
+    if (!dialog || !token) return;
     const timer = window.setTimeout(() => {
       if (mailbox.provider === "gmail") {
         api("/system/gmail-setup", token).then(setGmailSetup).catch(() => setGmailSetup(null));
@@ -2110,16 +2311,16 @@ export default function ProductionApp() {
     return () => window.clearTimeout(timer);
   }, [dialog, editingMailboxId, mailbox.address, mailbox.provider, token]);
   useEffect(() => {
-    if (section !== "Pending Emails") return;
+    const current = new URLSearchParams(location.search);
+    if (current.get("view") === "employee" && current.get("id") && !selectedEmployee) return;
     const query = new URLSearchParams({
-      search,
-      status: statusFilter,
-      date: dateFilter,
-      mailbox: mailboxFilter,
-      employee: employeeFilter,
-      page: String(page),
+      view: selectedEmployee ? "employee" : section === "Pending Emails" ? "pending" : section,
     });
-    history.replaceState(null, "", `?view=pending&${query}`);
+    if (selectedEmployee?.id) query.set("id", String(selectedEmployee.id));
+    if (section === "Pending Emails") {
+      query.set("search", search); query.set("status", statusFilter); query.set("date", dateFilter); query.set("mailbox", mailboxFilter); query.set("employee", employeeFilter); query.set("page", String(page));
+    }
+    history.replaceState(history.state, "", `?${query}`);
   }, [
     section,
     search,
@@ -2128,10 +2329,27 @@ export default function ProductionApp() {
     mailboxFilter,
     employeeFilter,
     page,
+    selectedEmployee?.id,
   ]);
-  if (authChecking) return <Box className="loading"><CircularProgress /></Box>;
-  if (!token) return <Login onLogin={setToken} />;
-  const rows =
+  useEffect(() => {
+    const restore = () => {
+      const query = new URLSearchParams(location.search);
+      const view = query.get("view");
+      setSection(view === "employee" ? "Employee Performance" : view === "pending" ? "Pending Emails" : sections.some((item) => item.name === view) ? view! : "Dashboard");
+      const employeeId = Number(query.get("id"));
+      if (view !== "employee" || !employeeId) {
+        setSelectedEmployee(null);
+        return;
+      }
+      const employee = employeePerformance.find((row) => row.id === employeeId);
+      if (employee && employee.id !== selectedEmployee?.id) void openEmployee(employee);
+      else if (!employeePerformance.length) return;
+    };
+    window.addEventListener("popstate", restore);
+    restore();
+    return () => window.removeEventListener("popstate", restore);
+  }, [employeePerformance, selectedEmployee?.id]);
+  const rows: any[] =
     section === "Pending Emails"
       ? data?.items || []
       : section === "Reports"
@@ -2141,6 +2359,24 @@ export default function ProductionApp() {
           : Array.isArray(data)
             ? data
             : [];
+  const [departmentFilter, setDepartmentFilter] = useState("");
+  const visibleRows = section === "Employee Performance" && departmentFilter
+    ? rows.filter((row) => row.department === departmentFilter)
+    : section === "Reports" && reportDimension === "employee" && departmentFilter
+      ? rows.filter((row) => row.department === departmentFilter && (!aiReviewEmployeeId || String(row.employee_id) === aiReviewEmployeeId))
+    : section === "Reports" && reportDimension === "employee" && aiReviewEmployeeId
+      ? rows.filter((row) => String(row.employee_id) === aiReviewEmployeeId)
+    : rows;
+  const departmentOptions = [...new Set([...departments, ...employees.map((employee) => employee.department || "General"), ...rows.map((row) => row.department || "General")])].sort();
+  const departmentCount = (department: string) => rows.filter((row) => (row.department || "General") === department).length;
+  const saveGmailCredentials = async (clientId: string, clientSecret: string) => {
+    await api("/system/gmail-setup", token, {
+      method: "POST",
+      body: JSON.stringify({ google_client_id: clientId, google_client_secret: clientSecret }),
+    });
+    setGmailSetup(await api("/system/gmail-setup", token));
+    setNotice("Google OAuth credentials saved.");
+  };
   const saveMailbox = async () => {
     try {
       const path = editingMailboxId
@@ -2221,56 +2457,13 @@ export default function ProductionApp() {
       setTestingGraph(false);
     }
   };
-  const saveGraphCredentials = async (payload: GraphConfig) => {
-    const normalized = {
-      azure_tenant_id: payload.azure_tenant_id.trim(),
-      azure_client_id: payload.azure_client_id.trim(),
-      azure_client_secret: payload.azure_client_secret.trim(),
-      graph_scope: payload.graph_scope.trim(),
-    };
-    if (!normalized.azure_tenant_id) {
-      setError("Tenant ID is required for this Microsoft Graph app-only setup.");
-      return;
-    }
-    if (!normalized.azure_client_id) {
-      setError("Client ID is required.");
-      return;
-    }
-    if (normalized.graph_scope !== GRAPH_APP_ONLY_SCOPE) {
-      setError(`Graph scope must be exactly ${GRAPH_APP_ONLY_SCOPE}.`);
-      return;
-    }
-    setSavingGraphCredentials(true);
-    try {
-      setError("");
-      const saved = await api("/system/graph-setup", token, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(normalized),
-      });
-      if (!saved?.saved || !saved?.credential_status?.runtime_loaded) {
-        throw new Error("Credentials were not loaded by backend. Check backend status.");
-      }
-      setGraphSetup(await api(`/system/graph-setup${mailbox.address ? `?mailbox=${encodeURIComponent(mailbox.address)}` : ""}`, token));
-      setReadiness(await api("/system/readiness", token));
-      setNotice(
-        normalized.azure_client_secret || normalized.azure_tenant_id
-          ? text("notice.graph_secret_saved")
-          : text("notice.graph_client_saved"),
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to save Graph credentials");
-    } finally {
-      setSavingGraphCredentials(false);
-    }
-  };
   const createPerson = async () => {
     if (!createDialog) return;
     try {
       const base = createDialog === "employee" ? "/employees" : "/users";
       const body =
         createDialog === "employee"
-          ? { name: person.name, email: person.email, active: person.active }
+          ? { name: person.name, email: person.email, department: person.department, active: person.active }
           : editingPersonId && !person.password
             ? { name: person.name, role: person.role, active: person.active }
             : {
@@ -2295,18 +2488,20 @@ export default function ProductionApp() {
       setPerson({
         name: "",
         email: "",
+        department: "General",
         password: "",
         role: "manager",
         active: true,
         mailbox_ids: [],
       });
-      const [m, e] = await Promise.all([
-        api("/mailboxes", token),
-        api("/employees", token),
-      ]);
+      const [m, e] = await Promise.all([api("/mailboxes", token), api("/employees", token)]);
       setMailboxes(m);
       setEmployees(e);
-      await load();
+      if (createDialog === "employee") {
+        const performance = await api(`/employees/performance?sort_by=${performanceSort}&order=${performanceOrder}`, token);
+        setData(performance);
+        setDepartmentFilter(person.department);
+      } else await load();
       setNotice(
         `${createDialog === "employee" ? "Employee" : "User"} ${editingPersonId ? "updated" : "created"} successfully.`,
       );
@@ -2317,6 +2512,8 @@ export default function ProductionApp() {
   const openEmail = async (row: any) => {
     try {
       const detail = await api(`/emails/${row.id}`, token);
+      api(`/emails/${row.id}/read`, token, { method: "PATCH" }).catch(() => undefined);
+      setReplyDraft("");
       setSelectedEmail({ ...detail, content_loading: role === "admin" });
       if (role === "admin") {
         try {
@@ -2328,6 +2525,44 @@ export default function ProductionApp() {
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load email");
+    }
+  };
+  const assistReply = async (mode: "draft" | "correct" | "rewrite") => {
+    if (!selectedEmail) return;
+    setAssistantMode(mode);
+    setError("");
+    try {
+      const result = await api(`/emails/${selectedEmail.id}/rewrite`, token, {
+        method: "POST",
+        body: JSON.stringify({ mode, body: replyDraft }),
+      });
+      setReplyDraft(result.body);
+      setNotice(mode === "draft" ? "AI draft ready for your review." : "Updated draft ready for your review.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "AI could not prepare a reply");
+    } finally {
+      setAssistantMode("");
+    }
+  };
+  const sendReply = async () => {
+    if (!selectedEmail || !replyDraft.trim()) return;
+    setReplyBusy(true);
+    setError("");
+    try {
+      const result = await api(`/emails/${selectedEmail.id}/reply`, token, {
+        method: "POST",
+        body: JSON.stringify({ body: replyDraft }),
+      });
+      setSelectedEmail((current: any) => current?.id === selectedEmail.id
+        ? { ...current, status: "replied", replied_at: result.replied_at }
+        : current);
+      setReplyDraft("");
+      setNotice(`Reply sent to ${result.recipient}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Reply could not be sent");
+    } finally {
+      setReplyBusy(false);
     }
   };
   const assignEmail = async (employeeId: string) => {
@@ -2345,6 +2580,20 @@ export default function ProductionApp() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Assignment failed");
+    }
+  };
+  const updateEmailStatus = async (status: "pending" | "ignored") => {
+    if (!selectedEmail) return;
+    try {
+      await api(`/emails/${selectedEmail.id}/status`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      setSelectedEmail((current: any) => current?.id === selectedEmail.id ? { ...current, status } : current);
+      setNotice(status === "ignored" ? "Email marked ignored." : "Email returned to pending.");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Email status update failed");
     }
   };
   const editMailbox = (row: any) => {
@@ -2372,6 +2621,111 @@ export default function ProductionApp() {
       setError(e instanceof Error ? e.message : "Unable to remove mailbox");
     }
   };
+  const removeEmployee = async (row: any) => {
+    if (!window.confirm(`Remove employee ${row.employee || row.name}?`)) return;
+    try {
+      await api(`/employees/${row.id}`, token, { method: "PATCH", body: JSON.stringify({ active: false }) });
+      setNotice("Employee removed.");
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to remove employee"); }
+  };
+  const openEmployee = async (row: any) => {
+    const query = new URLSearchParams(location.search);
+    if (query.get("view") === "employee" && Number(query.get("id")) === row.id) {
+      history.replaceState({ employeeAnalytics: true }, "", `?view=employee&id=${row.id}`);
+    } else {
+      history.pushState({ employeeAnalytics: true }, "", `?view=employee&id=${row.id}`);
+    }
+    const today = localDateKey();
+    setSelectedEmployee(row); setEmployeeTrend([]); setEmployeeHistory([]); setEmployeeHourly([]); setEmployeeDailySenders([]); setEmployeeMailReport(null); setEmployeePeriod("rolling"); setEmployeeReportPeriod("daily"); setEmployeeHourlyDate(today); setEmployeeSelectedDate(today);
+    try {
+      const trend = await api(`/employees/${row.id}/trend`, token);
+      setEmployeeTrend(trend);
+      setEmployeeHistory(trend);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load employee trend"); }
+  };
+  const closeEmployeeAnalytics = () => {
+    if (history.state?.employeeAnalytics) history.back();
+    else {
+      setSelectedEmployee(null);
+      history.replaceState(null, "", "?view=Employee%20Performance");
+    }
+  };
+  const changeEmployeePeriod = async (period: string) => {
+    if (!selectedEmployee?.id) return;
+    setEmployeePeriod(period);
+    setEmployeeHistory([]);
+    try {
+      const history = period === "rolling"
+        ? await api(`/employees/${selectedEmployee.id}/trend`, token)
+        : await api(`/employees/${selectedEmployee.id}/trend?year=${period}`, token);
+      setEmployeeHistory(history);
+      setEmployeeTrend(history);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load employee activity"); }
+  };
+  useEffect(() => {
+    if (!selectedEmployee?.id) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const history = employeePeriod === "rolling"
+          ? await api(`/employees/${selectedEmployee.id}/trend`, token)
+          : await api(`/employees/${selectedEmployee.id}/trend?year=${employeePeriod}`, token);
+        if (!cancelled) { setEmployeeHistory(history); setEmployeeTrend(history); }
+      } catch { /* Keep the last successful calendar during a temporary connection failure. */ }
+    };
+    const timer = window.setInterval(refresh, 30000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [selectedEmployee?.id, token, employeePeriod]);
+  useEffect(() => {
+    if (!selectedEmployee?.id) return;
+    let cancelled = false;
+    api(`/employees/${selectedEmployee.id}/hourly-activity?day=${employeeHourlyDate}`, token)
+      .then((activity) => { if (!cancelled) setEmployeeHourly(activity); })
+      .catch(() => { if (!cancelled) setEmployeeHourly([]); });
+    return () => { cancelled = true; };
+  }, [selectedEmployee?.id, token, employeeHourlyDate]);
+  useEffect(() => {
+    if (!selectedEmployee?.id) return;
+    let cancelled = false;
+    api(`/employees/${selectedEmployee.id}/daily-senders?day=${employeeSelectedDate}`, token)
+      .then((senders) => { if (!cancelled) setEmployeeDailySenders(senders); })
+      .catch(() => { if (!cancelled) setEmployeeDailySenders([]); });
+    return () => { cancelled = true; };
+  }, [selectedEmployee?.id, token, employeeSelectedDate]);
+  useEffect(() => {
+    if (!selectedEmployee?.id) return;
+    let cancelled = false;
+    api(`/reports/${employeeReportPeriod}/employees/${selectedEmployee.id}/mail`, token)
+      .then((result) => { if (!cancelled) setEmployeeMailReport(result); })
+      .catch(() => { if (!cancelled) setEmployeeMailReport({ mails: [] }); });
+    return () => { cancelled = true; };
+  }, [selectedEmployee?.id, token, employeeReportPeriod]);
+
+  useEffect(() => {
+    if (!aiReviewOpen || aiReviewConsent || !aiReviewEmployeeId || !aiReviewEnabled) return;
+    let cancelled = false;
+    let fetching = false;
+    const timer = window.setInterval(async () => {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const result = await api(`/reports/${reportPeriod}/employees/${aiReviewEmployeeId}/ai-review?page=${aiReviewPage}&page_size=100`, token);
+        if (!cancelled) setAiReviewResult(result);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Review progress could not be refreshed");
+      } finally {
+        fetching = false;
+      }
+    }, 10000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [aiReviewOpen, aiReviewConsent, aiReviewEmployeeId, aiReviewEnabled, reportPeriod, aiReviewPage, token]);
+
+  // Keep all hooks above this point so the auth transition never changes the
+  // hook order between renders.
+  if (authChecking) return <Box className="loading"><CircularProgress /></Box>;
+  if (!token) return <Login onLogin={setToken} />;
+
   const connectMailbox = async (row: any) => {
     const authWindow = window.open("about:blank", "_blank");
     if (!authWindow) {
@@ -2399,6 +2753,7 @@ export default function ProductionApp() {
     setPerson({
       name: source.name || source.employee,
       email: source.email || "",
+      department: source.department || "General",
       password: "",
       role: source.role || "manager",
       active: source.active ?? true,
@@ -2406,21 +2761,71 @@ export default function ProductionApp() {
     });
     setCreateDialog(kind);
   };
-  const downloadReport = async (format: "xlsx" | "pdf") => {
+  const downloadReport = async (format: "xlsx" | "csv" | "pdf", dimension = reportDimension) => {
     try {
+      const params = new URLSearchParams({ dimension, format });
+      if (reportDimension === "employee" && departmentFilter) params.set("department", departmentFilter);
+      if (reportDimension === "employee" && aiReviewEmployeeId) params.set("employee_id", aiReviewEmployeeId);
       const response = await fetch(
-        `/api/reports/${reportPeriod}/export?dimension=${reportDimension}&format=${format}`,
+        `/api/reports/${reportPeriod}/export?${params}`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (!response.ok) throw new Error("Report export failed");
       const href = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = href;
-      link.download = `oeis-${reportPeriod}-${reportDimension}.${format}`;
+      link.download = `oeis-${reportPeriod}-${dimension}.${format}`;
       link.click();
       URL.revokeObjectURL(href);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Report export failed");
+    }
+  };
+  const viewSenderReport = async () => {
+    if (!aiReviewEmployeeId) return;
+    try {
+      const result = await api(`/reports/${reportPeriod}?dimension=customer&employee_id=${aiReviewEmployeeId}`, token);
+      setSenderReport(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Sender report could not be loaded");
+    }
+  };
+  const generateEmployeeAIReview = async (page = aiReviewPage, employeeId = aiReviewEmployeeId) => {
+    if (!employeeId) return;
+    setAiReviewBusy(true);
+    setError("");
+    try {
+      const result = await api(`/reports/${reportPeriod}/employees/${employeeId}/ai-review?page=${page}&page_size=100`, token);
+      setAiReviewResult(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "AI review could not be prepared");
+    } finally {
+      setAiReviewBusy(false);
+    }
+  };
+  const enableDailyAIReviews = async () => {
+    setAiReviewBusy(true);
+    setError("");
+    try {
+      const result = await api("/reports/ai-review/status", token, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
+      setAiReviewEnabled(!!result.enabled);
+      setAiProviderConfigured(!!result.provider_configured);
+      setAiSchedulerEnabled(!!result.scheduler_enabled);
+      setAiReviewOpen(false);
+      setNotice("Continuous AI coaching reviews are enabled.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Continuous AI reviews could not be enabled");
+    } finally {
+      setAiReviewBusy(false);
+    }
+  };
+  const disableDailyAIReviews = async () => {
+    try {
+      const result = await api("/reports/ai-review/status", token, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+      setAiReviewEnabled(!!result.enabled);
+      setNotice("Continuous AI coaching reviews are disabled.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Continuous AI reviews could not be disabled");
     }
   };
   const saveSettings = async () => {
@@ -2457,6 +2862,18 @@ export default function ProductionApp() {
       setSavingSyncSettings(false);
     }
   };
+  const saveAiConfig = async () => {
+    if (!aiConfig) return;
+    setSavingAiConfig(true);
+    setError("");
+    try {
+      const saved = await api("/settings/ai-provider", token, { method: "PATCH", body: JSON.stringify({ provider: aiConfig.provider, model: aiConfig.model, api_key: aiKey || null }) });
+      setAiConfig(saved);
+      setAiKey("");
+      setNotice("AI provider and model saved. New AI requests use this selection.");
+    } catch (e) { setError(e instanceof Error ? e.message : "AI settings could not be saved"); }
+    finally { setSavingAiConfig(false); }
+  };
   const runSync = async () => {
     setSyncing(true);
     try {
@@ -2486,8 +2903,8 @@ export default function ProductionApp() {
   };
   const sendSummary = async () => {
     try {
-      await api("/reports/daily/send", token, { method: "POST" });
-      setNotice("Daily summary queued for delivery.");
+      const result = await api("/reports/daily/send", token, { method: "POST" });
+      setNotice(`Daily summary sent to ${result.recipient}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to send daily summary");
     }
@@ -2505,8 +2922,7 @@ export default function ProductionApp() {
           className={section === name ? "active" : ""}
           startIcon={icon}
           onClick={() => {
-            setSection(name);
-            setMobile(false);
+            navigateSection(name);
           }}
         >
           <Box className="nav-copy">
@@ -2553,7 +2969,7 @@ export default function ProductionApp() {
       >
         {side}
       </Drawer>
-      <Box className="workspace">
+      <Box className={`workspace${selectedEmployee ? " workspace-employee" : ""}`}>
         <Box className="top">
           <IconButton
             className="mobile-menu"
@@ -2602,7 +3018,96 @@ export default function ProductionApp() {
             )}
           </Box>
         </Box>
-        <Box className="main" id="main-content" data-tour="workspace">
+      <Box className="main" id="main-content" data-tour="workspace">
+        {selectedEmployee && <Box className="employee-analytics-page">
+          <Box className="employee-analytics-title"><Box><Typography variant="overline">EMPLOYEE PERFORMANCE</Typography><Typography variant="h4">Activity analytics</Typography><Typography variant="body2">Assigned mail and reply contribution for the selected period</Typography></Box><Box className="employee-title-actions"><Typography variant="h5">{selectedEmployee.employee}</Typography><Button onClick={closeEmployeeAnalytics} variant="outlined">Back to employees</Button></Box></Box>
+          <Box className="employee-analytics-content">
+            {(() => {
+              const selectedDay = employeeHistory.find((day) => day.date === employeeSelectedDate) ?? {
+                date: employeeSelectedDate, received: 0, replied: 0, pending: 0, ignored: 0,
+              };
+              const periodTotals = ["received", "replied", "pending", "ignored"].map((key) => ({ key, value: employeeHistory.reduce((total, day) => total + Number(day[key] || 0), 0) }));
+              const periodLabel = employeePeriod === "rolling" ? "Last 365 days" : employeePeriod;
+              return <>
+            <Box className="employee-calendar-layout">
+            <Box className="employee-calendar-main">
+            <Box className="contribution-panel">
+              {(() => {
+                const receivedTotal = Number(selectedDay?.received || 0);
+                const repliedTotal = Number(selectedDay?.replied || 0);
+                const completion = receivedTotal ? Math.round((repliedTotal / receivedTotal) * 100) : 0;
+                return <Box className="contribution-summary">
+                  <Box className="received-metric">
+                    <Typography variant="overline">MAIL VOLUME</Typography>
+                    <Typography variant="subtitle2">Received mail</Typography>
+                    <Typography className="metric-value" variant="h4">{receivedTotal.toLocaleString()}</Typography>
+                    <Typography variant="caption">Assigned on {formatIndiaDate(employeeSelectedDate, { day: "2-digit", month: "2-digit", year: "numeric" })}</Typography>
+                  </Box>
+                  <Box className="completion-metric">
+                    <Box className="completion-heading">
+                      <Box><Typography variant="overline">REPLY PERFORMANCE</Typography><Typography variant="subtitle2">Reply completion</Typography></Box>
+                      <Typography className="completion-value" variant="h4">{completion}%</Typography>
+                    </Box>
+                    <Box className="completion-track" role="progressbar" aria-label="Reply completion" aria-valuemin={0} aria-valuemax={100} aria-valuenow={completion}><Box className="completion-fill" style={{ width: `${completion}%` }} /></Box>
+                    <Typography variant="caption">{repliedTotal.toLocaleString()} of {receivedTotal.toLocaleString()} emails received that day were replied</Typography>
+                  </Box>
+                  <TextField className="daily-metric-date" type="date" size="small" label="Activity date (dd/mm/yyyy)" lang="en-IN" value={employeeSelectedDate} onChange={(event) => { const date = event.target.value; setEmployeeSelectedDate(date); setEmployeeHourlyDate(date); }} InputLabelProps={{ shrink: true }} />
+                </Box>;
+              })()}
+              <GitHubCalendar key={selectedEmployee.id} data={employeeHistory.map(day => ({ date: day.date, count: Number(day.replied || 0), received: Number(day.received || 0), pending: Number(day.pending || 0), ignored: Number(day.ignored || 0) }))} selectedDate={employeeSelectedDate} onPeriodChange={changeEmployeePeriod} onDaySelect={(date) => { setEmployeeSelectedDate(date); setEmployeeHourlyDate(date); }} />
+              <Typography variant="caption">Each box represents one day. Darker green means a higher percentage replied; empty days remain visible.</Typography>
+            </Box>
+              <Box className="employee-summary-row">
+              <Box className="employee-day-status employee-summary-card" aria-label={`Mail status for ${formatIndiaDate(employeeSelectedDate, { day: "2-digit", month: "2-digit", year: "numeric" })}`}>
+                <Box className="employee-summary-heading"><Typography variant="overline">SELECTED DAY</Typography><Typography variant="subtitle2">{formatIndiaDate(employeeSelectedDate, { day: "2-digit", month: "2-digit", year: "numeric" })}</Typography></Box>
+                <Box className="employee-summary-content">
+                  <Box className="employee-day-status-metrics">{[{ key: "replied", label: "Replied", color: "#18734e" }, { key: "pending", label: "Pending", color: "#bd7b18" }, { key: "ignored", label: "Ignored", color: "#718096" }].map(({ key, label, color }) => <Box className="employee-day-status-item" key={key}><Typography variant="caption">{label}</Typography><Typography variant="h6" sx={{ color }}>{Number(selectedDay[key] || 0).toLocaleString()}</Typography></Box>)}</Box>
+                  <Box className="employee-summary-pie"><Doughnut data={{ labels: ["Replied", "Pending", "Ignored"], datasets: [{ data: [Number(selectedDay.replied || 0), Number(selectedDay.pending || 0), Number(selectedDay.ignored || 0)], backgroundColor: ["#18734e", "#bd7b18", "#94a3b8"], borderWidth: 0 }] }} options={{ responsive: true, maintainAspectRatio: false, cutout: "62%", plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `${context.label}: ${Number(context.raw).toLocaleString()}` } } } }} />{Number(selectedDay.replied || 0) + Number(selectedDay.pending || 0) + Number(selectedDay.ignored || 0) > 0 && <Typography variant="caption" className="employee-pie-center">{(Number(selectedDay.replied || 0) + Number(selectedDay.pending || 0) + Number(selectedDay.ignored || 0)).toLocaleString()}<small>total</small></Typography>}</Box>
+                </Box>
+              </Box>
+              <Box className="employee-period-summary employee-summary-card">
+                <Box className="employee-summary-heading"><Typography variant="overline">PERIOD TOTALS</Typography><Typography variant="subtitle2">{periodLabel}</Typography></Box>
+                <Box className="employee-summary-content">
+                  <Box className="employee-period-total-list">{periodTotals.map(({ key, value }) => <Box className={`employee-period-total ${key}`} key={key}><Typography variant="caption">{key}</Typography><Typography variant="h5">{value.toLocaleString()}</Typography></Box>)}</Box>
+                  <Box className="employee-summary-pie employee-period-pie"><Doughnut data={{ labels: ["Received", "Replied", "Pending", "Ignored"], datasets: [{ data: periodTotals.map(({ value }) => value), backgroundColor: ["#3478f6", "#16885f", "#e4a323", "#94a3b8"], borderWidth: 0 }] }} options={{ responsive: true, maintainAspectRatio: false, cutout: "62%", animation: { duration: 900, animateRotate: true, animateScale: true }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `${context.label}: ${Number(context.raw).toLocaleString()}` } } } }} />{periodTotals.reduce((sum, item) => sum + item.value, 0) > 0 && <Typography variant="caption" className="employee-pie-center">{periodTotals.reduce((sum, item) => sum + item.value, 0).toLocaleString()}<small>total</small></Typography>}</Box>
+                </Box>
+              </Box>
+            </Box>
+            </Box>
+            </Box>
+            <Box className="employee-mail-report">
+              <Box className="employee-mail-report-head">
+                <Box><Typography variant="overline">MAIL-WISE REPORT</Typography><Typography variant="subtitle2">Why each mail appears in this review</Typography><Typography variant="caption">Every received mail assigned to {selectedEmployee.employee}, with the status and evidence used in coaching visibility.</Typography></Box>
+                <TextField select size="small" label="Report template" value={employeeReportPeriod} onChange={(event) => setEmployeeReportPeriod(event.target.value)} sx={{ minWidth: 150 }}>
+                  <MenuItem value="daily">Daily · today</MenuItem><MenuItem value="weekly">Weekly · 7 days</MenuItem><MenuItem value="monthly">Monthly · month</MenuItem>
+                </TextField>
+              </Box>
+              <Box className="employee-mail-report-summary"><Chip label={`${employeeMailReport?.mails?.length || 0} mails`} /><Typography variant="caption">AI reviews are evidence-led: classification, SLA urgency, reply status, and received time are shown so an admin can understand how the review was formed.</Typography></Box>
+              <Box className="employee-mail-list">
+                {employeeMailReport?.mails?.length ? employeeMailReport.mails.map((mail: any) => <Box className="employee-mail-row" key={mail.id}>
+                  <Box className="employee-mail-main"><Typography variant="subtitle2" noWrap>{mail.subject}</Typography><Typography variant="caption" noWrap>{mail.sender} · {mail.received_at ? new Date(mail.received_at).toLocaleString() : "—"}</Typography></Box>
+                  <Chip size="small" label={mail.status} color={mail.status === "replied" ? "success" : mail.status === "pending" ? "warning" : "default"} />
+                  <Box className="employee-mail-reason"><Typography variant="caption">Reason / evidence</Typography><Typography variant="body2">{mail.reason}</Typography></Box>
+                </Box>) : <Typography variant="body2" color="text.secondary">No received mail for this employee in the selected template period.</Typography>}
+              </Box>
+            </Box>
+            <Box className="employee-chart-grid">
+              <Box className="employee-chart-card">
+                <Typography variant="subtitle2">Received from · {formatIndiaDate(employeeSelectedDate, { day: "2-digit", month: "2-digit", year: "numeric" })}</Typography>
+                <Box className="daily-sender-list">
+                  {employeeDailySenders.length ? employeeDailySenders.map((sender) => <Box className="daily-sender-row" key={sender.sender} title={`${sender.sender}: ${sender.count} received`}><Box className="daily-sender-label"><Typography variant="body2" noWrap>{sender.sender}</Typography><Typography variant="subtitle2">{sender.count}</Typography></Box><LinearProgress variant="determinate" value={Math.max(4, sender.count / employeeDailySenders[0].count * 100)} /></Box>) : <Typography variant="body2" color="text.secondary">No received emails from senders on this day.</Typography>}
+                </Box>
+              </Box>
+              <Box className="employee-chart-card">
+                <Box className="hourly-chart-heading"><Box><Typography variant="subtitle2">Mail received by time</Typography><Typography variant="caption">{formatIndiaDate(employeeHourlyDate, { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" })} · mailbox local time</Typography></Box><TextField type="date" size="small" label="Activity date (dd/mm/yyyy)" lang="en-IN" value={employeeHourlyDate} onChange={(event) => setEmployeeHourlyDate(event.target.value)} InputLabelProps={{ shrink: true }} /></Box>
+                <Line data={{ labels: employeeHourly.map((slot) => { const minutes = slot.slot * 30; const hour = Math.floor(minutes / 60); const minute = minutes % 60; return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${hour >= 12 ? "PM" : "AM"}`; }), datasets: [{ label: "Received", data: employeeHourly.map((slot) => slot.received), borderColor: "#2f6fed", backgroundColor: "rgba(47,111,237,.10)", fill: true, tension: .25, pointRadius: 2, pointHoverRadius: 5 }] }} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `${context.parsed.y} email${context.parsed.y === 1 ? "" : "s"} received` } } }, scales: { x: { title: { display: true, text: "Time email was received" }, ticks: { maxRotation: 45, minRotation: 35, autoSkip: true, maxTicksLimit: 10 } }, y: { beginAtZero: true, ticks: { precision: 0, stepSize: 1 }, title: { display: true, text: "Emails received" } } } }} />
+              </Box>
+            </Box>
+              </>;
+            })()}
+          </Box>
+        </Box>}
+        {!selectedEmployee && <Box>
           <Box className="hero">
             <Box>
               <Typography className="date">
@@ -2646,6 +3151,7 @@ export default function ProductionApp() {
                   setPerson({
                     name: "",
                     email: "",
+                    department: departmentFilter || "Sales",
                     password: "",
                     role: "manager",
                     active: true,
@@ -2667,6 +3173,7 @@ export default function ProductionApp() {
                   setPerson({
                     name: "",
                     email: "",
+                    department: "General",
                     password: "",
                     role: "manager",
                     active: true,
@@ -2691,8 +3198,13 @@ export default function ProductionApp() {
           ) : section === "Dashboard" && data ? (
             <ReferenceDashboard
               data={data}
+              employeePerformance={employeePerformance}
+              employeeConnections={employeeConnections}
+              replyRate={replyRate}
+              growth={growth}
+              insights={insights}
               readiness={readiness}
-              onNavigate={setSection}
+              onNavigate={navigateSection}
               onSync={runSync}
               canSync={role === "admin"}
             />
@@ -2718,6 +3230,7 @@ export default function ProductionApp() {
                     <MenuItem value="critical">{text("filter.critical")}</MenuItem>
                     <MenuItem value="overdue">{text("filter.overdue")}</MenuItem>
                     <MenuItem value="replied">{text("filter.replied")}</MenuItem>
+                    <MenuItem value="ignored">Ignored</MenuItem>
                   </TextField>
                   <TextField
                     select
@@ -2763,6 +3276,7 @@ export default function ProductionApp() {
                     ))}
                   </TextField>
                   <Button onClick={load}>{text("filter.apply")}</Button>
+                  <Button variant={pendingView === "board" ? "contained" : "text"} onClick={() => setPendingView((value) => value === "table" ? "board" : "table")}>{pendingView === "board" ? "List view" : "Board view"}</Button>
                   <Button
                     onClick={() => {
                       setSearch("");
@@ -2784,7 +3298,7 @@ export default function ProductionApp() {
                     size="small"
                     label={text("report.period")}
                     value={reportPeriod}
-                    onChange={(e) => setReportPeriod(e.target.value)}
+                    onChange={(e) => { setReportPeriod(e.target.value); setAiReviewEmployeeId(""); setAiReviewPage(1); setAiReviewResult(null); }}
                     sx={{ minWidth: 130 }}
                   >
                     <MenuItem value="daily">{text("report.daily")}</MenuItem>
@@ -2796,28 +3310,74 @@ export default function ProductionApp() {
                     size="small"
                     label={text("report.dimension")}
                     value={reportDimension}
-                    onChange={(e) => setReportDimension(e.target.value)}
+                    onChange={(e) => { setReportDimension(e.target.value); setAiReviewEmployeeId(""); setAiReviewPage(1); setAiReviewResult(null); }}
                     sx={{ minWidth: 150 }}
                   >
+                    <MenuItem value="department">Department-wise</MenuItem>
                     <MenuItem value="employee">{text("report.employee")}</MenuItem>
                     <MenuItem value="customer">{text("report.customer")}</MenuItem>
                     <MenuItem value="mailbox">{text("report.mailbox")}</MenuItem>
                   </TextField>
+                  {reportDimension === "employee" && (
+                    <>
+                      <Box className="department-switcher" role="group" aria-label="Filter report by department">
+                        {["All departments", ...departmentOptions].map((department) => {
+                          const value = department === "All departments" ? "" : department;
+                          const count = value ? rows.filter((row) => row.department === value).length : rows.length;
+                          return <Button key={department} variant={departmentFilter === value ? "contained" : "outlined"} onClick={() => { setDepartmentFilter(value); setAiReviewEmployeeId(""); }}>{department}<Chip size="small" label={count} /></Button>;
+                        })}
+                      </Box>
+                      <TextField select size="small" label="Employee" value={aiReviewEmployeeId} onChange={(event) => { setAiReviewEmployeeId(event.target.value); setAiReviewPage(1); }} sx={{ minWidth: 210 }}>
+                        <MenuItem value="">All employees</MenuItem>
+                        {rows.filter((row) => row.employee_id && (!departmentFilter || row.department === departmentFilter)).map((row) => <MenuItem key={row.employee_id} value={String(row.employee_id)}>{row.dimension} · {row.department}</MenuItem>)}
+                      </TextField>
+                      <Button disabled={!aiReviewEmployeeId} onClick={viewSenderReport}>View sender counts</Button>
+                      <Button disabled={!aiReviewEmployeeId} onClick={() => { setAiReviewConsent(false); setAiReviewResult(null); setAiReviewPage(1); setAiReviewOpen(true); void generateEmployeeAIReview(1); }}>View AI coaching report</Button>
+                      {aiReviewEnabled ? (
+                        <>
+                          {role === "admin" && <Button color="warning" onClick={disableDailyAIReviews}>Disable continuous AI reviews</Button>}
+                        </>
+                      ) : role === "admin" ? (
+                        <>
+                          <Button disabled={!aiProviderConfigured || !aiSchedulerEnabled} onClick={() => { setAiReviewConsent(true); setAiReviewResult(null); setAiReviewOpen(true); }}>Enable continuous AI reviews</Button>
+                          {!aiProviderConfigured && <Typography variant="caption">Configure the AI provider to enable reviews.</Typography>}
+                          {aiProviderConfigured && !aiSchedulerEnabled && <Typography variant="caption">Enable the backend scheduler and restart the app to run continuous reviews.</Typography>}
+                        </>
+                      ) : (
+                        <Typography variant="caption">Continuous AI reviews are not enabled.</Typography>
+                      )}
+                    </>
+                  )}
                   <Button onClick={() => downloadReport("xlsx")}>
                     {text("report.export_excel")}
+                  </Button>
+                  <Button onClick={() => downloadReport("csv")}>
+                    Export CSV
                   </Button>
                   <Button onClick={() => downloadReport("pdf")}>
                     {text("report.export_pdf")}
                   </Button>
                   {role === "admin" && (
-                    <Button onClick={sendSummary}>
+                    <Button onClick={sendSummary} disabled={!readiness?.smtp_configured}>
                       {text("report.send_daily")}
                     </Button>
                   )}
+                  {role === "admin" && !readiness?.smtp_configured && <Typography variant="caption">Connect an Outlook mailbox to email the report.</Typography>}
                 </Box>
               )}
+              {section === "Reports" && <Alert severity="info" sx={{ mb: 2 }}>
+                {reportPeriod === "daily" ? "Today" : reportPeriod === "weekly" ? "Last 7 days" : "This month"} · Customer emails received since {formatMailboxDateTime(data?.period_start)}.
+                {rows.every((row) => Number(row.total_received) === 0) && <> No incoming mail was received in this period.{data?.latest_received_at && <> Latest received mail: {formatMailboxDateTime(data.latest_received_at)}.</>} Choose a longer period to see earlier mail.</>}
+              </Alert>}
               {section === "Employee Performance" && (
-                <Box className="toolbar">
+                <Box className="toolbar performance-toolbar">
+                  <Box className="department-switcher" role="group" aria-label="Filter employees by department">
+                    {["All departments", ...departmentOptions].map((department) => {
+                      const value = department === "All departments" ? "" : department;
+                      const count = value ? departmentCount(value) : rows.length;
+                      return <Button key={department} variant={departmentFilter === value ? "contained" : "outlined"} onClick={() => setDepartmentFilter(value)}>{department}<Chip size="small" label={count} /></Button>;
+                    })}
+                  </Box>
                   <TextField
                     select
                     size="small"
@@ -2887,16 +3447,47 @@ export default function ProductionApp() {
                   )}
                 </Box>
               )}
-              {section !== "Settings" && (
+              {section === "AI Settings" && aiConfig && (
+                <Box sx={{ p: 3, display: "grid", gap: 2, maxWidth: 680 }}>
+                  <Typography variant="h6">AI provider and model</Typography>
+                  <Typography color="text.secondary">Choose where new AI drafts and employee reviews are sent. Each provider has its own usage limit.</Typography>
+                  <TextField select label="Provider" value={aiConfig.provider} onChange={(e) => { const provider=e.target.value; setAiConfig({ ...aiConfig, provider, model:Object.keys(aiConfig.models[provider])[0] }); setAiKey(""); }}>
+                    {Object.keys(aiConfig.models).map((provider) => <MenuItem key={provider} value={provider}>{provider === "openrouter" ? "OpenRouter" : provider === "nvidia" ? "NVIDIA" : "Gemini"}{aiConfig.configured[provider] ? " · key saved" : " · add key"}</MenuItem>)}
+                  </TextField>
+                  <TextField select label="Model" value={aiConfig.model} onChange={(e) => setAiConfig({ ...aiConfig, model:e.target.value })}>
+                    {!aiConfig.models[aiConfig.provider]?.[aiConfig.model] && <MenuItem value={aiConfig.model}>{aiConfig.model} (current)</MenuItem>}
+                    {Object.entries(aiConfig.models[aiConfig.provider] || {}).map(([id, label]) => <MenuItem key={id} value={id}>{label}</MenuItem>)}
+                  </TextField>
+                  <TextField label={`${aiConfig.provider === "openrouter" ? "OpenRouter" : aiConfig.provider === "nvidia" ? "NVIDIA" : "Gemini"} API key`} type="password" autoComplete="new-password" value={aiKey} onChange={(e) => setAiKey(e.target.value)} helperText={aiConfig.configured[aiConfig.provider] ? "A key is saved. Leave blank to keep it." : "Add a key before saving this provider."} />
+                  <Button variant="contained" disabled={savingAiConfig || (!aiConfig.configured[aiConfig.provider] && !aiKey.trim())} onClick={saveAiConfig}>{savingAiConfig ? "Saving…" : "Save AI settings"}</Button>
+                </Box>
+              )}
+              {section !== "Settings" && section !== "AI Settings" && (
                 <>
-                  <DataTable
-                    rows={rows}
+                  {section === "Employee Performance" ? (
+                    <DataTable
+                      rows={visibleRows}
+                      emptyTitle={emptyTitle(section)}
+                      emptyDescription={departmentFilter ? `No employees are listed in ${departmentFilter} yet.` : emptyDescription(section)}
+                      onSelect={openEmployee}
+                      onEdit={role === "admin" ? (row) => editPerson("employee", row) : undefined}
+                      onDelete={role === "admin" ? removeEmployee : undefined}
+                    />
+                  ) : section === "Pending Emails" && pendingView === "board" ? <MailKanban rows={rows} onSelect={openEmail} /> : <DataTable
+                    rows={visibleRows}
+                    dimensionLabel={section === "Reports" ? reportDimension === "customer" ? "Sender" : reportDimension[0].toUpperCase()+reportDimension.slice(1) : undefined}
                     emptyTitle={emptyTitle(section)}
                     emptyDescription={emptyDescription(section)}
                     onSelect={
                       section === "Pending Emails"
                         ? openEmail
-                        : section === "Mailboxes"
+                          : section === "Reports" && reportDimension === "employee"
+                            ? (row) => { const employeeId = String(row.employee_id || ""); setAiReviewEmployeeId(employeeId); setAiReviewPage(1); setAiReviewResult(null); setAiReviewConsent(false); setAiReviewOpen(true); void generateEmployeeAIReview(1, employeeId); }
+                          : section === "Reports" && reportDimension === "department"
+                            ? (row) => { setReportDimension("employee"); setDepartmentFilter(row.dimension); setAiReviewEmployeeId(""); }
+                          : section === "Employee Performance"
+                            ? openEmployee
+                          : section === "Mailboxes"
                           ? editMailbox
                           : section === "Employee Performance" &&
                               role === "admin"
@@ -2905,11 +3496,10 @@ export default function ProductionApp() {
                               ? (row) => editPerson("user", row)
                               : undefined
                     }
-                    onConnect={
-                      section === "Mailboxes" ? connectMailbox : undefined
-                    }
-                    onDelete={section === "Mailboxes" ? removeMailbox : undefined}
-                  />
+                    onConnect={section === "Mailboxes" ? connectMailbox : undefined}
+                    onEdit={section === "Mailboxes" ? editMailbox : section === "Employee Performance" ? (row) => editPerson("employee", row) : undefined}
+                    onDelete={section === "Mailboxes" ? removeMailbox : section === "Employee Performance" ? removeEmployee : undefined}
+                  />}
                   {section === "Pending Emails" &&
                     data?.total > data?.page_size && (
                       <Box className="pagination">
@@ -2948,7 +3538,7 @@ export default function ProductionApp() {
               )}
             </Card>
           )}
-        </Box>
+        </Box>}
       </Box>
       <Dialog open={dialog} onClose={() => setDialog(false)}>
         <DialogTitle>
@@ -3008,14 +3598,14 @@ export default function ProductionApp() {
                 <MenuItem value="error">{text("dialog.mailbox.error")}</MenuItem>
               </TextField>
             )}
-            {!editingMailboxId && (
-              mailbox.provider === "gmail" ? (
+            {mailbox.provider === "gmail" ? (
                 <GmailSetupPipeline
                   setup={gmailSetup}
                   onCopy={copyText}
                   onDownload={downloadText}
+                  onSaveCredentials={saveGmailCredentials}
                 />
-              ) : (
+              ) : !editingMailboxId ? (
                 <GraphSetupPipeline
                   setup={graphSetup}
                   mailboxAddress={mailbox.address}
@@ -3023,11 +3613,8 @@ export default function ProductionApp() {
                   onDownload={downloadText}
                   onTestGraph={testGraphConnection}
                   testingGraph={testingGraph}
-                  onSaveCredentials={saveGraphCredentials}
-                  savingCredentials={savingGraphCredentials}
                 />
-              )
-            )}
+              ) : null}
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -3058,6 +3645,11 @@ export default function ProductionApp() {
               value={person.email}
               onChange={(e) => setPerson({ ...person, email: e.target.value })}
             />
+            {createDialog === "employee" && (
+              <TextField select label="Department" value={person.department} onChange={(e) => setPerson({ ...person, department: e.target.value })} required>
+                {departments.map((department) => <MenuItem key={department} value={department}>{department}</MenuItem>)}
+              </TextField>
+            )}
             {createDialog === "user" && (
               <>
                 <TextField
@@ -3132,10 +3724,63 @@ export default function ProductionApp() {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog open={aiReviewOpen} onClose={() => { if (!aiReviewBusy) setAiReviewOpen(false); }} maxWidth="md" fullWidth>
+        <DialogTitle>{aiReviewResult ? `AI coaching review · ${aiReviewResult.employee}` : aiReviewConsent ? "Enable continuous AI coaching reviews" : "AI coaching report"}</DialogTitle>
+        <DialogContent dividers>
+          {aiReviewResult ? (
+            <Stack spacing={2}>
+              <Box className="admin-work-snapshot"><Box className="admin-snapshot-title"><Typography variant="overline">ADMIN WORK SNAPSHOT</Typography><Typography variant="subtitle2">{aiReviewResult.employee} · {aiReviewResult.department}</Typography><Typography variant="caption">{aiReviewResult.period} review period · conversation evidence processed separately</Typography></Box><Box className="admin-snapshot-metrics"><Box><small>Reviewed</small><strong>{aiReviewResult.reviewed_count}</strong><span>{aiReviewResult.conversation_count ? Math.round(aiReviewResult.reviewed_count / aiReviewResult.conversation_count * 100) : 0}% complete</span></Box><Box><small>Waiting</small><strong>{aiReviewResult.pending_count}</strong><span>Needs mailbox sync or review</span></Box><Box><small>Failed</small><strong>{aiReviewResult.failed_count}</strong><span>{aiReviewResult.failed_count ? "Needs retry" : "No failed reviews"}</span></Box><Box><small>Visible mail</small><strong>{aiReviewResult.conversation_count}</strong><span>Assigned customer conversations</span></Box></Box></Box>
+              <Box className="admin-review-charts"><Box className="admin-chart-card"><Typography variant="subtitle2">Review status</Typography><Box className="admin-doughnut"><Doughnut data={{ labels: ["Reviewed", "Waiting", "Failed"], datasets: [{ data: [aiReviewResult.reviewed_count, aiReviewResult.pending_count, aiReviewResult.failed_count], backgroundColor: ["#16885f", "#e4a323", "#d14343"], borderWidth: 0 }] }} options={{ responsive: true, maintainAspectRatio: false, cutout: "68%", plugins: { legend: { position: "bottom", labels: { boxWidth: 10, font: { size: 10 } } } } }} /></Box></Box><Box className="admin-chart-card admin-progress-chart"><Typography variant="subtitle2">Conversation coverage</Typography><Bar data={{ labels: ["Reviewed", "Waiting", "Failed"], datasets: [{ data: [aiReviewResult.reviewed_count, aiReviewResult.pending_count, aiReviewResult.failed_count], backgroundColor: ["#16885f", "#e4a323", "#d14343"], borderRadius: 7, barThickness: 22 }] }} options={{ indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { grid: { display: false } } } }} /></Box></Box>
+              <Box className="handling-score-panel"><Box className="handling-score-circle" role="img" aria-label={aiReviewResult.work_score?.score == null ? `${aiReviewResult.work_score?.assessed_points || 0} of 100 points assessed` : `Coaching score ${aiReviewResult.work_score.score} out of 100`}><Doughnut data={{ labels: ["Earned", "Assessed but not earned", "Unscored"], datasets: [{ data: [aiReviewResult.work_score?.earned_points ?? 0, Math.max(0,(aiReviewResult.work_score?.assessed_points ?? 0)-(aiReviewResult.work_score?.earned_points ?? 0)), 100-(aiReviewResult.work_score?.assessed_points ?? 0)], backgroundColor: ["#16885f", "#e8eef5", "#f0c46c"], borderWidth: 0 }] }} options={{ responsive: true, maintainAspectRatio: false, cutout: "78%", plugins: { legend: { display: false } } }} /><Box className="handling-score-center"><strong>{aiReviewResult.work_score?.score ?? "—"}</strong><small>{aiReviewResult.work_score?.score == null ? `${aiReviewResult.work_score?.assessed_points || 0}/100 assessed` : "out of 100"}</small></Box></Box><Box className="handling-score-details"><Typography variant="overline">EVIDENCE-BASED COACHING SCORE</Typography><Typography variant="h6">Reply handling and answer quality</Typography><Typography variant="caption">{aiReviewResult.work_score?.sample_size || 0} customer mails · 10 reply completion + 30 professionalism + 20 detail + 10 speed + 10 clarity + 10 follow-through + 10 actionable next step.</Typography><Box className="handling-factor-list">{aiReviewResult.work_score?.factors?.map((factor: any) => <Box key={factor.label} className="handling-factor"><Box><b>{factor.label}</b><span>{factor.value == null ? "Unscored" : `${factor.value}/100`} · {factor.weight} points</span></Box><LinearProgress variant="determinate" value={factor.value ?? 0} /><small>{factor.detail}</small></Box>)}</Box></Box></Box>
+              <Alert severity="info">The full /100 appears only when every factor has evidence. Missing reply text stays unscored. This coaching indicator needs admin review before any personnel decision.</Alert>
+              <Typography variant="caption">Each conversation is reviewed separately after new mail or replies sync. Background checks run every 30 seconds; this view refreshes automatically.</Typography>
+              {aiReviewBusy && <LinearProgress />}
+              {!aiReviewResult.conversation_count && <Typography color="text.secondary">No customer conversations were assigned to this employee during this period.</Typography>}
+              {aiReviewResult.reviews.map((review: any, index: number) => (
+                <Card key={`${review.subject}-${index}`} variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle2">{review.subject}</Typography>
+                  <Typography variant="caption" color="text.secondary">From {review.sender} · {formatMailboxDateTime(review.received_at)} · {review.mailbox}</Typography>
+                  {review.analyzed_at && <Typography variant="caption" color="text.secondary">{review.status === "ready" ? "Reviewed" : "Last attempt"} {new Date(review.analyzed_at).toLocaleString()}</Typography>}
+                  {review.status === "ready" ? <VisualCoachingReview review={review} /> : <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{review.status === "failed" ? ["ai_provider_http_402", "ai_provider_http_429"].includes(review.error) ? "AI provider limit reached. Open AI Settings to choose another provider or model; review will retry automatically." : "Review temporarily unavailable. Automatic retry starts within a minute." : "Queued for background review after mailbox synchronization."}</Typography>}
+                </Card>
+              ))}
+              {aiReviewResult.total_pages > 1 && <Pagination page={aiReviewResult.page} count={aiReviewResult.total_pages} onChange={(_, page) => { setAiReviewPage(page); void generateEmployeeAIReview(page); }} color="primary" />}
+              {error && <Alert severity="error">{error}</Alert>}
+            </Stack>
+          ) : !aiReviewConsent ? (
+            <Stack spacing={2} alignItems="center" sx={{ py: 4 }}>
+              {aiReviewBusy && <><CircularProgress /><Typography>Loading the saved coaching reviews…</Typography></>}
+              {error && <Alert severity="error">{error}</Alert>}
+            </Stack>
+          ) : (
+            <Stack spacing={2}>
+              <Typography>After you approve, OEIS will review new or changed employee conversations throughout the day, checking for changes every 30 seconds and save the AI findings. Monthly reports will load those saved findings instead of asking the AI to reread the month’s mail.</Typography>
+              {!aiSchedulerEnabled && <Alert severity="warning">The application scheduler is disabled. Enable the backend scheduler and restart the app before enabling continuous reviews.</Alert>}
+              <Typography variant="body2">Conversation text is sent to the AI provider configured for reply assistance. OEIS stores the findings and processing status, but not message bodies. The provider’s own data handling follows its configured terms. Changed conversations are processed one at a time; conversations awaiting synchronization or review stay visible as waiting. Long conversations are reviewed in smaller sections and combined into saved findings.</Typography>
+              <Alert severity="warning">AI observations can be incomplete or mistaken. Review cited examples and the original conversations. This report is for coaching visibility only and must not be used as a character judgment, score, or salary decision.</Alert>
+              {error && <Alert severity="error">{error}</Alert>}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={aiReviewBusy} onClick={() => setAiReviewOpen(false)}>{aiReviewResult ? "Close" : text("dialog.cancel")}</Button>
+          {aiReviewConsent && !aiReviewEnabled && role === "admin" && <Button variant="contained" disabled={aiReviewBusy || !aiProviderConfigured || !aiSchedulerEnabled} startIcon={<AutoAwesome />} onClick={enableDailyAIReviews}>{aiReviewBusy ? "Enabling…" : "Approve and enable continuous reviews"}</Button>}
+        </DialogActions>
+      </Dialog>
+      <Dialog open={!!senderReport} onClose={() => setSenderReport(null)} maxWidth="lg" fullWidth>
+        <DialogTitle>Sender counts · {rows.find((row) => String(row.employee_id) === aiReviewEmployeeId)?.dimension} · {reportPeriod}</DialogTitle>
+        <DialogContent dividers><DataTable rows={senderReport?.rows || []} dimensionLabel="Sender" emptyTitle="No mail in this period" emptyDescription="Sender counts include received mail assigned to this employee." /></DialogContent>
+        <DialogActions>
+          <Button onClick={() => downloadReport("csv", "customer")}>Export CSV</Button>
+          <Button onClick={() => downloadReport("xlsx", "customer")}>Export Excel</Button>
+          <Button onClick={() => downloadReport("pdf", "customer")}>Export PDF</Button>
+          <Button onClick={() => setSenderReport(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
       <Drawer
         anchor="right"
         open={!!selectedEmail}
-        onClose={() => setSelectedEmail(null)}
+        onClose={() => { setSelectedEmail(null); setReplyDraft(""); }}
       >
         <Box className="detail production-detail">
           <Box className="detail-head">
@@ -3193,6 +3838,52 @@ export default function ProductionApp() {
                   )}
                 </Box>
               )}
+              {role === "admin" && selectedEmail.folder === "inbox" && (
+                <Box className="reply-composer">
+                  <Box className="reply-composer-head">
+                    <Box>
+                      <Typography variant="subtitle1">Reply to customer</Typography>
+                      <Typography variant="body2">To: {selectedEmail.sender}</Typography>
+                    </Box>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      {selectedEmail.status === "replied" && <Chip size="small" color="success" label="Replied" />}
+                      {selectedEmail.status === "ignored" && <Chip size="small" color="default" label="Ignored" />}
+                      {selectedEmail.status === "ignored" ? (
+                        <Button size="small" onClick={() => updateEmailStatus("pending")}>Restore</Button>
+                      ) : (
+                        <Button size="small" color="warning" onClick={() => updateEmailStatus("ignored")}>Ignore</Button>
+                      )}
+                    </Stack>
+                  </Box>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={6}
+                    maxRows={14}
+                    label="Your reply"
+                    value={replyDraft}
+                    onChange={(event) => setReplyDraft(event.target.value)}
+                    disabled={replyBusy || !!assistantMode}
+                    inputProps={{ maxLength: 10000 }}
+                  />
+                  <Box className="reply-ai-actions">
+                    <Button size="small" startIcon={assistantMode === "draft" ? <CircularProgress size={16} /> : <AutoAwesome />} onClick={() => assistReply("draft")} disabled={!!assistantMode || replyBusy || !!selectedEmail.content_error || !!selectedEmail.content_loading}>
+                      Draft with AI
+                    </Button>
+                    <Button size="small" startIcon={assistantMode === "correct" ? <CircularProgress size={16} /> : <AutoFixHigh />} onClick={() => assistReply("correct")} disabled={!replyDraft.trim() || !!assistantMode || replyBusy || !!selectedEmail.content_error || !!selectedEmail.content_loading}>
+                      Fix grammar
+                    </Button>
+                    <Button size="small" startIcon={assistantMode === "rewrite" ? <CircularProgress size={16} /> : <AutoFixHigh />} onClick={() => assistReply("rewrite")} disabled={!replyDraft.trim() || !!assistantMode || replyBusy || !!selectedEmail.content_error || !!selectedEmail.content_loading}>
+                      Rewrite
+                    </Button>
+                  </Box>
+                  <Typography className="reply-review-note" variant="caption">Email context is sent to the configured AI service. Review every suggestion before sending.</Typography>
+                  {error && <Alert severity="error">{error}</Alert>}
+                  <Button variant="contained" startIcon={replyBusy ? <CircularProgress size={16} color="inherit" /> : <Send />} onClick={sendReply} disabled={!replyDraft.trim() || replyBusy || !!assistantMode}>
+                    {replyBusy ? "Sending…" : "Send reply"}
+                  </Button>
+                </Box>
+              )}
               <TextField
                 select
                 fullWidth
@@ -3234,6 +3925,7 @@ export default function ProductionApp() {
         onClose={() => setTourOpen(false)}
         onStepChange={handleTourStep}
       />
+      </Box>
     </Box>
   );
 }

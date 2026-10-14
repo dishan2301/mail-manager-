@@ -3,16 +3,21 @@ from datetime import datetime,timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
-from sqlalchemy import func,select
+from sqlalchemy import create_engine,func,select
+from sqlalchemy.orm import sessionmaker
 
-from app.core.database import SessionLocal
+from app.core.database import Base
 from app.models.entities import Classification,Email,EmailStatus,EscalationEvent,Mailbox,SLATier
 from app.services import jobs
 
 
 def test_escalation_delivery_is_recorded_once_per_threshold(monkeypatch):
+    engine=create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions=sessionmaker(bind=engine)
+    monkeypatch.setattr(jobs,"SessionLocal",sessions)
     suffix=uuid4().hex
-    with SessionLocal() as db:
+    with sessions() as db:
         mailbox=Mailbox(address=f"escalation-{suffix}@example.com",display_name="Escalation test",timezone="UTC")
         db.add(mailbox);db.flush()
         email=Email(mailbox_id=mailbox.id,message_id=f"message-{suffix}",sender="customer@example.com",receiver=mailbox.address,subject="Escalation acceptance",received_time=datetime.now(timezone.utc),folder="inbox",categories=[],classification=Classification.CUSTOMER,status=EmailStatus.PENDING,pending_hours=30,sla_tier=SLATier.CRITICAL)
@@ -20,9 +25,10 @@ def test_escalation_delivery_is_recorded_once_per_threshold(monkeypatch):
     monkeypatch.setattr(jobs,"get_settings",lambda:SimpleNamespace(dashboard_url="https://oeis.example",manager_email="manager@example.com",director_email="director@example.com"))
     monkeypatch.setattr(jobs,"send_html",lambda *args,**kwargs:True)
     jobs.process_escalations();jobs.process_escalations()
-    with SessionLocal() as db:
+    with sessions() as db:
         count=db.scalar(select(func.count()).select_from(EscalationEvent).where(EscalationEvent.email_id==email_id))
         assert count==2
+    engine.dispose()
 
 
 def test_distributed_lease_skips_duplicate_and_cancels_work_when_renewal_is_lost(monkeypatch):

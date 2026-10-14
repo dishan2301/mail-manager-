@@ -5,3 +5,20 @@
 @media(max-width:900px){.desktop-nav{display:none}.workspace{padding:0}.top{margin:0;border-width:0 0 1px;border-radius:0;top:0}.side{width:270px;height:100vh;min-height:100vh;top:0;border-radius:0}.main{padding:22px 18px 40px}.hero{min-height:unset;padding:19px}.hero h1{font-size:31px}.MuiDrawer-paper{background:transparent!important}.nav-copy b{font-size:13px}.nav-copy small{font-size:10px}}
 @media(max-width:600px){.top{padding:0 10px}.top>div:nth-of-type(1){max-width:112px}.top>div:nth-of-type(1) b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.guide-button,.signout-button,.sync-button{min-width:40px!important;width:40px;padding:8px!important;font-size:0!important}.guide-button .MuiButton-startIcon,.signout-button .MuiButton-startIcon,.sync-button .MuiButton-startIcon{margin:0}.main{padding:18px 14px 34px}.hero{border-radius:17px}.hero h1{font-size:28px}.hero p{font-size:12px}.executive-strip{min-height:104px}.dashboard-stage .kpi{min-height:150px}.toolbar{padding:12px}.toolbar .MuiButton-root{flex:1}.prod-login>.MuiCard-root{padding:30px 24px}}
 @media(prefers-reduced-motion:reduce){.top{backdrop-filter:none}.dashboard-stage .kpi,.clickable-row{transition:none!important}}
+
+.performance-toolbar{align-items:flex-start;flex-wrap:wrap}
+.department-switcher{display:flex;gap:8px;flex-wrap:wrap;width:100%;padding-bottom:4px}
+.department-switcher .MuiButton-root{min-height:42px;gap:9px;border-radius:11px;text-transform:none;font-weight:750}
+.department-switcher .MuiButton-outlined{border-color:#cfdae6;background:#fff;color:#334b63}
+.department-switcher .MuiButton-contained{border:1px solid #cbd9ee;background:#eaf1fb;color:#244d83;box-shadow:inset 0 0 0 1px rgba(36,77,131,.04)}
+.department-switcher .MuiChip-root{height:21px;font-size:11px}
+.reply-rate-caption{display:block;margin:12px 20px 18px;color:#64778b;font-size:11px;line-height:1.5}
+@media(max-width:600px){.department-switcher{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.department-switcher .MuiButton-root{justify-content:space-between;padding:7px 10px;font-size:12px}}
+
+/* Keep navigation fixed while the current workspace scrolls independently. */
+.shell{height:100vh;min-height:0;overflow:hidden}
+.desktop-nav{height:100vh;min-height:0;flex:0 0 286px}
+.desktop-nav>.side{height:100%;min-height:0;position:relative;top:0}
+.workspace{height:100vh;min-height:0;min-width:0;flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}
+.workspace-employee{padding-left:0}
+@media(max-width:900px){.shell{height:100dvh}.workspace{height:100dvh}.desktop-nav{height:100dvh}}

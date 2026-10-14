@@ -1,0 +1,37 @@
+.github-calendar{width:100%;max-width:1000px;margin:0 auto;padding:8px 0;color:#43594c;font-size:12px}
+.github-calendar-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:18px;margin:0 auto 8px;max-width:1000px}
+.github-calendar-scroll{overflow-x:auto;padding:4px 2px 8px}
+.github-calendar-layout{display:grid;gap:2px;grid-template-rows:22px repeat(7,14px);width:max-content}
+.github-calendar-scroll>.github-calendar-layout{margin:0 auto}
+.github-month{white-space:nowrap;font-size:11px;overflow:visible}
+.github-weekday{font-size:10px;line-height:12px}
+.github-day{width:14px;height:14px;padding:0;border:1px solid rgba(23,50,77,.08);border-radius:3px;cursor:pointer;transition:background-color .2s}
+.github-day:hover,.github-day:focus-visible,.github-day[aria-pressed=true]{outline:2px solid #17324d;outline-offset:1px}
+.github-day:hover,.github-day:focus-visible{position:relative;z-index:3}
+.github-weather{position:relative;z-index:2;overflow:hidden;pointer-events:none;min-width:0;opacity:.78}
+.github-weather-particle{position:absolute;top:-12px;pointer-events:none;scale:var(--weather-scale,1);animation-timing-function:linear;animation-iteration-count:infinite}
+.github-weather-snow .github-weather-particle{width:9px;height:9px;animation-name:github-snowfall}
+.github-weather-snow svg{display:block;width:100%;height:100%;fill:none;stroke:#347eab;stroke-width:1.6;stroke-linecap:round;filter:drop-shadow(0 0 1px #fff)}
+.github-weather-rain .github-weather-particle{width:2px;height:15px;border-radius:2px;background:linear-gradient(transparent,#277fcd 35%,#15578e);animation-name:github-rainfall}
+.github-weather-heat{opacity:1}
+.github-weather-heat::before{content:"";position:absolute;pointer-events:none;inset:-12px;background:radial-gradient(ellipse at 90% 12%,rgba(255,177,43,.46),rgba(255,205,107,.16) 38%,transparent 72%);animation:github-sunlight 9s ease-in-out infinite alternate}
+.github-weather-heat::after{content:"";position:absolute;pointer-events:none;inset:auto 0 0;height:20px;background:linear-gradient(0deg,rgba(228,139,29,.22),transparent)}
+.github-summer-sun{position:absolute;top:5px;right:9px;width:34px;height:34px;fill:#ffd16b;stroke:#cf8516;stroke-width:1.7;stroke-linecap:round;opacity:.95;filter:drop-shadow(0 0 6px #ffce7c99);animation:github-sunturn 48s linear infinite}
+.github-weather-heat .github-weather-particle{width:4px;height:4px;border-radius:50%;background:#dba044;box-shadow:0 0 4px #ffcd73;animation-name:github-summer-drift;animation-timing-function:ease-in-out}
+.github-season-toggle{flex-shrink:0;border:1px solid #d3dfd2;border-radius:8px;background:#fffdf5;color:#43594c;padding:7px 12px;font:inherit;font-size:11px;cursor:pointer}
+.github-season-toggle[aria-pressed=true]{background:#edf5f2;border-color:#a9c8bb}
+.github-season-toggle:focus-visible{outline:2px solid #17324d;outline-offset:2px}
+@keyframes github-snowfall{0%{transform:translate(-3px,0) rotate(0deg);opacity:0}10%{opacity:.95}50%{transform:translate(var(--weather-drift),60px) rotate(60deg)}90%{opacity:.95}100%{transform:translate(-2px,126px) rotate(120deg);opacity:0}}
+@keyframes github-rainfall{0%{transform:translate(4px,0) rotate(12deg);opacity:0}10%{opacity:.9}90%{opacity:.9}100%{transform:translate(calc(-14px + var(--weather-drift)),138px) rotate(12deg);opacity:0}}
+@keyframes github-summer-drift{0%{transform:translate(0,8px);opacity:0}25%{opacity:.8}55%{transform:translate(var(--weather-drift),-8px);opacity:.6}100%{transform:translate(calc(var(--weather-drift) * -1),-25px);opacity:0}}
+@keyframes github-sunturn{to{transform:rotate(360deg)}}
+@keyframes github-sunlight{from{opacity:.55;transform:translate(-4px,0) scale(1)}to{opacity:.9;transform:translate(4px,3px) scale(1.06)}}
+@media(prefers-reduced-motion:reduce){.github-weather .github-weather-particle{animation:none;top:40%;bottom:auto;opacity:.8}.github-weather-particle:nth-child(3n){top:15%}.github-weather-particle:nth-child(3n + 1){top:65%}}
+@media(prefers-reduced-motion:reduce){.github-weather-heat::before{animation:none;opacity:.7}.github-summer-sun{animation:none}.github-weather-heat .github-weather-particle{display:none}}
+.github-legend{display:flex;align-items:center;justify-content:flex-end;gap:6px;white-space:nowrap;margin:2px auto 0;max-width:1100px;color:#4f6556;font-size:11px}
+.github-swatch{height:12px;width:12px;border-radius:3px}
+@media(prefers-reduced-motion:reduce){.github-day{transition:none}}
+.github-periods{display:flex;flex-wrap:wrap;justify-content:flex-start;gap:8px}
+.github-periods button{border:1px solid #d3dfd2;border-radius:8px;background:#fffdf5;color:#43594c;padding:7px 12px;cursor:pointer}
+.github-periods button[aria-pressed=true]{background:#28744c;color:#fff;border-color:#28744c}
+@media(max-width:800px){.github-calendar-toolbar{align-items:flex-end;flex-direction:column}.github-legend{justify-content:flex-end;flex-wrap:wrap}.github-calendar-scroll>.github-calendar-layout{margin:0}}

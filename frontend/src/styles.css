@@ -349,6 +349,31 @@ tbody tr:hover {
   margin-top: 12px;
   color: #667085;
 }
+.reply-composer {
+  display: grid;
+  gap: 14px;
+  margin: 24px 0;
+  padding-top: 20px;
+  border-top: 1px solid #dbe5ef;
+}
+.reply-composer-head,
+.reply-ai-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.reply-composer-head .MuiTypography-body2,
+.reply-review-note {
+  color: #667085;
+}
+.reply-ai-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.reply-composer > .MuiButton-contained {
+  justify-self: end;
+}
 @media (max-width: 1200px) {
   .kpis {
     grid-template-columns: repeat(4, 1fr);

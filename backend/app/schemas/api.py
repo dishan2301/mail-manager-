@@ -11,11 +11,6 @@ class MailboxUpdate(BaseModel): display_name:str|None=None;status:MailboxStatus|
 class MailboxOut(BaseModel):
     id:int;address:str;display_name:str;provider:str;status:MailboxStatus;timezone:str;connected:bool=False;last_synced_at:datetime|None;last_sync_error:str|None
     model_config={"from_attributes":True}
-class GraphConfigInput(BaseModel):
-    azure_tenant_id:str=Field(default="",max_length=128)
-    azure_client_id:str=Field(min_length=1,max_length=128)
-    azure_client_secret:str=Field(default="",max_length=512)
-    graph_scope:str="https://graph.microsoft.com/.default"
 class GraphCheckInput(BaseModel): mailbox:EmailStr|None=None
 class SyncSettingsInput(BaseModel):
     interval_seconds:int=Field(default=10,ge=10,le=86400)
@@ -32,8 +27,8 @@ class ClassificationRuleInput(BaseModel):
         try:regex.compile(value)
         except regex.error as exc:raise ValueError(f"Invalid regular expression: {exc}") from exc
         return value
-class EmployeeInput(BaseModel): name:str=Field(min_length=1,max_length=120);email:EmailStr;active:bool=True
-class EmployeeUpdate(BaseModel): name:str|None=Field(default=None,min_length=1,max_length=120);email:EmailStr|None=None;active:bool|None=None
+class EmployeeInput(BaseModel): name:str=Field(min_length=1,max_length=120);email:EmailStr;department:str=Field(default="General",min_length=1,max_length=120);active:bool=True
+class EmployeeUpdate(BaseModel): name:str|None=Field(default=None,min_length=1,max_length=120);email:EmailStr|None=None;department:str=Field(default="General",min_length=1,max_length=120);active:bool|None=None
 class CalendarInput(BaseModel):
     mailbox_id:int|None=None;timezone:str="Asia/Kolkata";workday_start:str="09:00";workday_end:str="18:00";weekdays:list[int]=Field(default_factory=lambda:[0,1,2,3,4]);holidays:list[str]=Field(default_factory=list)
     @model_validator(mode="after")
@@ -57,6 +52,13 @@ class UserUpdate(BaseModel):
     name:str|None=Field(default=None,min_length=1,max_length=120);password:str|None=Field(default=None,min_length=15,max_length=128);role:Role|None=None;active:bool|None=None
     _password_policy=field_validator("password")(_strong_password)
 class ManagerMailboxAccessInput(BaseModel):mailbox_ids:list[int]=Field(default_factory=list,max_length=500)
+class ReplyInput(BaseModel):body:str=Field(min_length=1,max_length=10000)
+class WritingAssistantInput(BaseModel):
+    body:str=Field(default="",max_length=10000);mode:Literal["draft","correct","rewrite"]="draft"
+    @model_validator(mode="after")
+    def require_draft_for_edits(self):
+        if self.mode!="draft" and not self.body.strip():raise ValueError("A draft is required for correction or rewrite")
+        return self
 def _safe_ui_text(value:str|None):
     if value is None:return value
     if regex.search(r"(?i)<\s*script\b|\bon[a-z]+\s*=|javascript\s*:",value):raise ValueError("Active HTML content is not allowed")

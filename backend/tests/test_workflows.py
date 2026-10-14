@@ -21,7 +21,9 @@ def test_mailbox_employee_pending_assignment_and_report_workflow():
         assert client.get("/api/emails/pending?search=Test%20Employee",headers=headers).json()["total"]==1
         assert client.get("/api/emails/pending?search=workflow@example.com",headers=headers).json()["total"]==1
         performance=client.get("/api/employees/performance",headers=headers);assert performance.status_code==200 and performance.json()[0]["pending"]==1
-        report=client.get("/api/reports/daily?dimension=mailbox",headers=headers);assert report.status_code==200 and report.json()["rows"][0]["pending"]==1
+        report=client.get("/api/reports/daily?dimension=mailbox",headers=headers);assert report.status_code==200
+        row=next(row for row in report.json()["rows"] if row["dimension"]=="workflow@example.com")
+        assert row["not_replied"]==1 and row["total_received"]==1 and row["reply_rate"]==0
 
 def test_pending_queue_is_prioritized_and_numbered_across_pages():
     with TestClient(app) as client:

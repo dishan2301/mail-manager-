@@ -37,6 +37,12 @@ def test_unauthenticated_pending_is_denied():
 
 def test_unauthenticated_email_content_is_denied():
     with TestClient(app) as client:assert client.get("/api/emails/1/content").status_code==401
+
+def test_unauthenticated_email_reply_and_ai_assistance_are_denied():
+    with TestClient(app) as client:
+        assert client.post("/api/emails/1/reply",json={"body":"Reply"}).status_code==401
+        assert client.post("/api/emails/1/rewrite",json={"mode":"draft","body":""}).status_code==401
+
 def test_admin_login_and_report_exports(monkeypatch,tmp_path):
     with TestClient(app) as client:
         login=client.post("/api/auth/login",data={"username":"admin@oeis.local","password":"OEIS-Admin@July2026#47"})
@@ -50,11 +56,12 @@ def test_admin_login_and_report_exports(monkeypatch,tmp_path):
         assert setup.status_code==200
         body=setup.json()
         assert body["graph_configured"] is False
-        assert "Microsoft Graph application permission Mail.Read" in body["required_permission"]
+        assert "Microsoft Graph application permissions Mail.Read and Mail.Send" in body["required_permission"]
         assert "support@example.com" in body["exchange_policy_commands"]
         assert "AZURE_CLIENT_ID" in body["env_template"]
         assert "az ad app create" in body["azure_cli_commands"]
         assert "MAIL_READ_ROLE_ID" in body["azure_cli_commands"]
+        assert client.post("/api/system/graph-setup",headers=headers,json={"azure_tenant_id":"tenant-1","azure_client_id":"client-1","azure_client_secret":"secret#1","graph_scope":"https://graph.microsoft.com/.default"}).status_code==405
         assert client.post("/api/system/graph-config",headers=headers,json={"azure_tenant_id":"tenant-1","azure_client_id":"client-1","azure_client_secret":"secret#1","graph_scope":"https://graph.microsoft.com/.default"}).status_code in {404,405}
         for key in ("AZURE_TENANT_ID","AZURE_CLIENT_ID","AZURE_CLIENT_SECRET","GRAPH_SCOPE"):os.environ.pop(key,None)
     get_settings.cache_clear()

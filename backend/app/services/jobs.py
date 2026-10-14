@@ -13,6 +13,7 @@ from app.models.entities import Email,EmailStatus,EscalationEvent,SLARule,SLATie
 from app.services.content import content as ui_text
 from app.services.notifications import send_html
 from app.services.sync import sync_all_mailboxes
+from app.services.conversation_reviews import review_new_or_changed_conversations
 
 
 logger=logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def _summary_html(db,name:str,pending:list[Email],critical:int,overdue:int,avera
     return ui_text(db,"notification.summary.body",greeting=greeting,pending=len(pending),critical=critical,overdue=overdue,average=escape(average_text),top=top,url=escape(dashboard_link,quote=True))
 
 
-def _daily_summary_job():
+def _daily_summary_job(recipient_email:str|None=None):
     settings=get_settings();dashboard_link=f"{settings.dashboard_url.rstrip('/')}?view=pending"
     with SessionLocal() as db:
         pending=list(db.scalars(select(Email).where(Email.status==EmailStatus.PENDING).order_by(Email.pending_hours.desc())))
@@ -91,13 +92,23 @@ def _daily_summary_job():
         overdue=sum(email.sla_tier==SLATier.OVERDUE for email in pending)
         average=sum(email.pending_hours for email in replied)/len(replied) if replied else 0
         hours=int(average);minutes=round((average-hours)*60);average_text=f"{hours} Hr {minutes} Min"
+        if recipient_email:
+            if not send_html(recipient_email,ui_text(db,"notification.summary.subject"),_summary_html(db,"",pending,critical,overdue,average_text,dashboard_link)):
+                raise RuntimeError("No report delivery provider available")
+            return
         managers=list(db.scalars(select(User).where(User.role==Role.MANAGER,User.active.is_(True))))
         if not managers and settings.manager_email:
             send_html(settings.manager_email,ui_text(db,"notification.summary.subject"),_summary_html(db,"",pending,critical,overdue,average_text,dashboard_link))
+        if not managers and not settings.manager_email:
+            managers=list(db.scalars(select(User).where(User.role==Role.ADMIN,User.active.is_(True))))
         for manager in managers:
             send_html(manager.email,ui_text(db,"notification.summary.subject"),_summary_html(db,manager.name,pending,critical,overdue,average_text,dashboard_link))
 
 
-async def daily_summary_job():
-    async def operation():await asyncio.to_thread(_daily_summary_job);return True
+async def daily_summary_job(recipient_email:str|None=None):
+    async def operation():await asyncio.to_thread(_daily_summary_job,recipient_email);return True
     return await _run_with_lease("oeis:daily-summary",operation,300)
+
+
+async def conversation_ai_review_job():
+    return await _run_with_lease("oeis:conversation-ai-review",review_new_or_changed_conversations,6*60*60)

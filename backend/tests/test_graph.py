@@ -60,3 +60,53 @@ def test_graph_message_content_requests_plain_text_and_encodes_message_id(monkey
     assert content=="Full customer request"
     assert "/users/support@example.com/messages/opaque%2Fid%2Bvalue%3D" in client.url
     assert client.headers["Prefer"]=='outlook.body-content-type="text"'
+
+def test_graph_reply_uses_provider_reply_action_and_encodes_message_id(monkeypatch):
+    class ReplyResponse:
+        status_code=202;headers={}
+    class ReplyClient:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_):pass
+        async def post(self,url,json,headers):
+            self.url=url;self.payload=json;self.headers=headers;return ReplyResponse()
+    client=ReplyClient();adapter=graph.GraphDeltaSync.__new__(graph.GraphDeltaSync);adapter.settings=Settings()
+    async def token(force=False):return "token"
+    adapter._token=token;monkeypatch.setattr(graph.httpx,"AsyncClient",lambda **_:client)
+    asyncio.run(adapter.send_reply("support@example.com","opaque/id+value=","customer@example.com","Re: Help","Thanks"))
+    assert client.url.endswith("/users/support@example.com/messages/opaque%2Fid%2Bvalue%3D/reply")
+    assert client.payload=={"comment":"Thanks"} and client.headers["Authorization"]=="Bearer token"
+
+def test_graph_report_delivery_uses_send_mail(monkeypatch):
+    class Client:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_):pass
+        async def post(self,url,json,headers):
+            self.url=url;self.payload=json;self.headers=headers
+            return type("Response",(),{"status_code":202})()
+    client=Client();adapter=graph.GraphDeltaSync.__new__(graph.GraphDeltaSync);adapter.settings=Settings()
+    async def token():return "token"
+    adapter._send_token=token
+    monkeypatch.setattr(graph.httpx,"AsyncClient",lambda **_:client)
+    asyncio.run(adapter.send_html("support@example.com","admin@example.com","Daily summary","<b>Report</b>"))
+    assert client.url.endswith("/users/support@example.com/sendMail")
+    assert client.payload["message"]["toRecipients"][0]["emailAddress"]["address"]=="admin@example.com"
+    assert client.payload["message"]["body"]=={"contentType":"HTML","content":"<b>Report</b>"}
+    assert client.headers["Authorization"]=="Bearer token"
+
+def test_legacy_graph_read_scope_is_upgraded_for_reply_consent():
+    settings=Settings(graph_delegated_scopes="Mail.Read offline_access User.Read")
+    assert graph.delegated_scopes(settings)==["Mail.Read","User.Read"]
+    assert graph.delegated_auth_code_scopes(settings)==["Mail.Read","User.Read","Mail.Send"]
+
+def test_delegated_refresh_requests_send_scope_only_for_reply():
+    class DelegatedTokenApp:
+        def __init__(self):self.scopes=[]
+        def acquire_token_by_refresh_token(self,refresh_token,scopes):
+            self.scopes.append(scopes)
+            return {"access_token":"token","refresh_token":"rotated-token"}
+    adapter=graph.DelegatedGraphDeltaSync.__new__(graph.DelegatedGraphDeltaSync)
+    adapter.settings=Settings(graph_delegated_scopes="Mail.Read Mail.Send offline_access User.Read")
+    adapter.refresh_token="refresh-token";adapter.latest_refresh_token="refresh-token";adapter.app=DelegatedTokenApp()
+    assert adapter._token_sync()=="token"
+    assert adapter._token_sync(send=True)=="token"
+    assert adapter.app.scopes==[["Mail.Read","User.Read"],["Mail.Read","User.Read","Mail.Send"]]

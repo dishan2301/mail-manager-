@@ -35,11 +35,15 @@ class Settings(BaseSettings):
     graph_scope: str = "https://graph.microsoft.com/.default"
     graph_allowed_hosts: str = "graph.microsoft.com"
     graph_redirect_uri: str = "http://localhost:8000/api/graph/oauth/callback"
-    graph_delegated_scopes: str = "Mail.Read offline_access User.Read"
+    graph_delegated_scopes: str = "Mail.Read Mail.Send offline_access User.Read"
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback"
-    gmail_scopes: str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email"
+    gmail_scopes: str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email"
+    ai_api_key: str = ""
+    ai_api_base_url: str = "https://api.openai.com/v1"
+    ai_model: str = "gpt-4o"
+    ai_fallback_model: str = "gpt-4o-mini"
     frontend_url: str = "http://localhost:5173"
     sync_interval_seconds: int = 10
     scheduler_enabled: bool = True
