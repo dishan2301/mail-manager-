@@ -7,11 +7,11 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models.entities import Mailbox,MailboxStatus
 from app.services.graph import DelegatedGraphDeltaSync,GraphDeltaSync,delegated_authority_tenant
-from app.services.secrets import get_mailbox_token,set_mailbox_token
+from app.services.secrets import get_mailbox_token,set_mailbox_token,mailbox_graph_settings
 
 def report_mailbox_available()->bool:
     with SessionLocal() as db:
-        return any(mailbox.provider=="microsoft" and mailbox.status==MailboxStatus.ACTIVE and (get_mailbox_token(mailbox,get_settings()) or get_settings().azure_client_secret or get_settings().azure_client_certificate_path) for mailbox in db.scalars(select(Mailbox)))
+        return any(mailbox.provider=="microsoft" and mailbox.status==MailboxStatus.ACTIVE and (get_mailbox_token(mailbox,get_settings()) or (configured:=mailbox_graph_settings(mailbox,get_settings())).azure_client_secret or configured.azure_client_certificate_path) for mailbox in db.scalars(select(Mailbox)))
 
 def send_html(to:str,subject:str,html:str)->bool:
     s=get_settings()
@@ -19,9 +19,10 @@ def send_html(to:str,subject:str,html:str)->bool:
     if not (s.smtp_host and s.smtp_username and s.smtp_password):
         with SessionLocal() as db:
             for mailbox in db.scalars(select(Mailbox).where(Mailbox.provider=="microsoft",Mailbox.status==MailboxStatus.ACTIVE).order_by(Mailbox.id)):
+                mailbox_settings=mailbox_graph_settings(mailbox,s)
                 refresh_token=get_mailbox_token(mailbox,s)
-                if not refresh_token and not (s.azure_client_secret or s.azure_client_certificate_path):continue
-                strategy=DelegatedGraphDeltaSync(s,refresh_token,delegated_authority_tenant(mailbox.address,s)) if refresh_token else GraphDeltaSync(s)
+                if not refresh_token and not (mailbox_settings.azure_client_secret or mailbox_settings.azure_client_certificate_path):continue
+                strategy=DelegatedGraphDeltaSync(mailbox_settings,refresh_token,delegated_authority_tenant(mailbox.address,mailbox_settings)) if refresh_token else GraphDeltaSync(mailbox_settings)
                 asyncio.run(strategy.send_html(mailbox.address,to,subject,html))
                 if refresh_token and strategy.latest_refresh_token!=refresh_token:
                     set_mailbox_token(mailbox,strategy.latest_refresh_token,s);db.commit()

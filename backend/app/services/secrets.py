@@ -55,6 +55,19 @@ def get_mailbox_token(mailbox:Mailbox,settings:Settings|None=None)->str|None:
     return mailbox.graph_refresh_token
 
 
+def set_mailbox_azure_secret(mailbox:Mailbox,value:str,settings:Settings|None=None)->None:
+    ciphertext,nonce,key_id=SecretCipher(settings or get_settings()).encrypt(value,f"oeis:mailbox:{mailbox.id}:azure-client-secret")
+    mailbox.azure_secret_ciphertext=ciphertext;mailbox.azure_secret_nonce=nonce;mailbox.azure_secret_key_id=key_id
+
+
+def mailbox_graph_settings(mailbox:Mailbox,settings:Settings|None=None)->Settings:
+    settings=settings or get_settings()
+    if not mailbox.azure_client_id:
+        return settings
+    secret=SecretCipher(settings).decrypt(mailbox.azure_secret_ciphertext,mailbox.azure_secret_nonce,mailbox.azure_secret_key_id,f"oeis:mailbox:{mailbox.id}:azure-client-secret") if mailbox.azure_secret_ciphertext else settings.azure_client_secret
+    return settings.model_copy(update={"azure_client_id":mailbox.azure_client_id,"azure_tenant_id":mailbox.azure_tenant_id or "","azure_client_secret":secret,"azure_client_certificate_path":""})
+
+
 def migrate_mailbox_token(mailbox:Mailbox,settings:Settings|None=None)->bool:
     configured=settings or get_settings();cipher=SecretCipher(configured)
     if mailbox.graph_refresh_token:set_mailbox_token(mailbox,mailbox.graph_refresh_token,configured);return True

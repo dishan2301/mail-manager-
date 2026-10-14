@@ -910,7 +910,7 @@ function GraphSetupPipeline({
         <Box>
           <Typography fontWeight={700}>{text("graph_ui.save_title")}</Typography>
           <Alert severity="info">
-            Set AZURE_CLIENT_ID and AZURE_CLIENT_SECRET in your deployment secret manager, and set AZURE_TENANT_ID for organizational mailboxes. Restart the API after updating secrets. OEIS does not accept or store provider client secrets in this page.
+            Enter AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_CLIENT_SECRET above, then submit the mailbox. The saved secret stays hidden when you edit it.
           </Alert>
         </Box>
         {setup.graph_configured && !personalMailbox && (
@@ -2031,6 +2031,9 @@ export default function ProductionApp() {
       provider: "microsoft",
       timezone: "Asia/Kolkata",
       status: "active",
+      azure_client_id: "",
+      azure_tenant_id: "",
+      azure_client_secret: "",
     }),
     [editingMailboxId, setEditingMailboxId] = useState<number | null>(null),
     [search, setSearch] = useState(initialQuery.get("search") || ""),
@@ -2387,12 +2390,14 @@ export default function ProductionApp() {
             display_name: mailbox.display_name,
             timezone: mailbox.timezone,
             status: mailbox.status,
+            ...(mailbox.provider === "microsoft" ? { azure_client_id: mailbox.azure_client_id || undefined, azure_tenant_id: mailbox.azure_tenant_id || undefined, azure_client_secret: mailbox.azure_client_secret || undefined } : {}),
           }
         : {
             address: mailbox.address,
             display_name: mailbox.display_name,
             provider: mailbox.provider,
             timezone: mailbox.timezone,
+            ...(mailbox.provider === "microsoft" ? { azure_client_id: mailbox.azure_client_id || undefined, azure_tenant_id: mailbox.azure_tenant_id || undefined, azure_client_secret: mailbox.azure_client_secret || undefined } : {}),
           };
       await api(path, token, {
         method: editingMailboxId ? "PATCH" : "POST",
@@ -2406,6 +2411,9 @@ export default function ProductionApp() {
         provider: "microsoft",
         timezone: "Asia/Kolkata",
         status: "active",
+        azure_client_id: "",
+        azure_tenant_id: "",
+        azure_client_secret: "",
       });
       await load();
       setMailboxes(await api("/mailboxes", token));
@@ -2604,6 +2612,9 @@ export default function ProductionApp() {
       provider: row.provider || "microsoft",
       timezone: row.timezone,
       status: row.status,
+      azure_client_id: row.azure_client_id || "",
+      azure_tenant_id: row.azure_tenant_id || "",
+      azure_client_secret: "",
     });
     setDialog(true);
   };
@@ -3134,6 +3145,9 @@ export default function ProductionApp() {
                     provider: "microsoft",
                     timezone: "Asia/Kolkata",
                     status: "active",
+                    azure_client_id: "",
+                    azure_tenant_id: "",
+                    azure_client_secret: "",
                   });
                   setDialog(true);
                 }}
@@ -3573,6 +3587,12 @@ export default function ProductionApp() {
                 setMailbox({ ...mailbox, display_name: e.target.value })
               }
             />
+            {mailbox.provider === "microsoft" && <>
+              <Typography variant="subtitle2">Microsoft Azure app credentials</Typography>
+              <TextField label="AZURE_CLIENT_ID" value={mailbox.azure_client_id} onChange={(e) => setMailbox({ ...mailbox, azure_client_id: e.target.value })} />
+              <TextField label="AZURE_TENANT_ID" value={mailbox.azure_tenant_id} onChange={(e) => setMailbox({ ...mailbox, azure_tenant_id: e.target.value })} />
+              <TextField label="AZURE_CLIENT_SECRET" type="password" autoComplete="new-password" value={mailbox.azure_client_secret} onChange={(e) => setMailbox({ ...mailbox, azure_client_secret: e.target.value })} helperText={editingMailboxId ? "Leave blank to keep the saved secret." : "Encrypted when you submit the mailbox."} />
+            </>}
             <TextField
               select
               label={text("dialog.mailbox.timezone")}

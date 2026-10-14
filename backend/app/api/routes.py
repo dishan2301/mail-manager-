@@ -25,7 +25,7 @@ from app.services.gmail import GmailDeltaSync,gmail_scopes
 from app.services.content import content as ui_text,seed_ui_content
 from app.core.security import hash_password
 from app.services.security_events import audit,check_login_allowed,clear_login_failures,record_login_failure,validate_cookie_origin
-from app.services.secrets import get_mailbox_token,set_mailbox_token
+from app.services.secrets import get_mailbox_token,set_mailbox_token,set_mailbox_azure_secret,mailbox_graph_settings
 from app.services.oauth_transactions import _digest,clear_oauth_cookie,consume_transaction,new_oauth_values,pkce_pair,save_transaction
 from app.services.authorization import mailbox_scope,require_email_scope
 from app.services.writing_assistant import WritingAssistantError,suggest_reply
@@ -186,14 +186,14 @@ def dashboard_kpis(principal:dict=viewer,db:Session=Depends(get_db)):return Dash
 @router.get("/system/readiness",dependencies=[viewer])
 def system_readiness(principal:dict=viewer,db:Session=Depends(get_db)):
     settings=get_settings();allowed=mailbox_scope(db,principal);scope=[] if allowed is None else [Mailbox.id.in_(allowed)];active=list(db.scalars(select(Mailbox).where(Mailbox.status!=MailboxStatus.PAUSED,*scope)));configured=len(active);healthy=db.scalar(select(func.count()).select_from(Mailbox).where(Mailbox.status==MailboxStatus.ACTIVE,*scope)) or 0;errors=db.scalar(select(func.count()).select_from(Mailbox).where(Mailbox.status==MailboxStatus.ERROR,*scope)) or 0;paused=db.scalar(select(func.count()).select_from(Mailbox).where(Mailbox.status==MailboxStatus.PAUSED,*scope)) or 0;last_sync=db.scalar(select(func.max(Mailbox.last_synced_at)).where(*scope));warnings=sum(1 for row in active if row.last_sync_error and row.last_sync_error.startswith("Temporary sync issue:"))
-    delegated=any(row.provider=="microsoft" and row.connected for row in active)
-    graph_app=bool(settings.azure_client_id and settings.azure_tenant_id and (settings.azure_client_secret or settings.azure_client_certificate_path));graph_configured=bool(settings.azure_client_id and (delegated or graph_app));gmail_configured=bool(settings.google_client_id and settings.google_client_secret)
-    integration_configured=bool(active) and all((row.connected and gmail_configured) if row.provider=="gmail" else (bool(row.connected and settings.azure_client_id) or graph_app) for row in active)
+    graph_configured=any(row.provider=="microsoft" and bool((configured:=mailbox_graph_settings(row,settings)).azure_client_id and (row.connected or configured.azure_tenant_id and (configured.azure_client_secret or configured.azure_client_certificate_path))) for row in active);gmail_configured=bool(settings.google_client_id and settings.google_client_secret)
+    integration_configured=bool(active) and all((row.connected and gmail_configured) if row.provider=="gmail" else bool((configured:=mailbox_graph_settings(row,settings)).azure_client_id and (row.connected or configured.azure_tenant_id and (configured.azure_client_secret or configured.azure_client_certificate_path))) for row in active)
     return {"operational":bool(integration_configured and configured and not errors and last_sync),"integration_configured":integration_configured,"graph_configured":graph_configured,"gmail_configured":gmail_configured,"smtp_configured":bool(settings.smtp_host and settings.smtp_username and settings.smtp_password) or report_mailbox_available(),"configured_mailboxes":configured,"healthy_mailboxes":healthy,"error_mailboxes":errors,"warning_mailboxes":warnings,"paused_mailboxes":paused,"last_successful_sync":last_sync}
 @router.get("/system/graph-setup",dependencies=[admin])
 def graph_setup(mailbox:str|None=None,db:Session=Depends(get_db)):
-    settings=get_settings();using_secret=bool(settings.azure_client_secret);using_certificate=bool(settings.azure_client_certificate_path);graph_configured=bool(settings.azure_tenant_id and settings.azure_client_id and (using_secret or using_certificate))
-    missing=[name for name,value in {"AZURE_CLIENT_ID":settings.azure_client_id,"AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH":using_secret or using_certificate}.items() if not value]
+    row=db.scalar(select(Mailbox).where(Mailbox.address==mailbox)) if mailbox else None
+    settings=mailbox_graph_settings(row,get_settings()) if row else get_settings();using_secret=bool(settings.azure_client_secret);using_certificate=bool(settings.azure_client_certificate_path);graph_configured=bool(settings.azure_tenant_id and settings.azure_client_id and (using_secret or using_certificate))
+    missing=[name for name,value in {"AZURE_CLIENT_ID":settings.azure_client_id,"AZURE_TENANT_ID":settings.azure_tenant_id,"AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH":using_secret or using_certificate}.items() if not value]
     app_id=settings.azure_client_id or "<AZURE_CLIENT_ID>";tenant=settings.azure_tenant_id or "common";address=mailbox or "<MAILBOX_ADDRESS>";group=ui_text(db,"graph.group.allowed_mailboxes")
     azure_cli=[
         ui_text(db,"graph.script.requires_azure_cli"),
@@ -236,6 +236,7 @@ async def check_graph(payload:GraphCheckInput):
         if payload.mailbox:
             with SessionLocal() as db:
                 row=db.scalar(select(Mailbox).where(Mailbox.address==str(payload.mailbox)))
+                if row:settings=mailbox_graph_settings(row,settings)
             if row and row.connected:
                 graph=DelegatedGraphDeltaSync(settings,get_mailbox_token(row,settings),delegated_authority_tenant(row.address,settings))
                 await graph.sync_mailbox(str(payload.mailbox));mailbox_checked=True
@@ -298,6 +299,7 @@ def _email_strategy(row:Email,settings):
     if row.mailbox.provider=="gmail":
         if not refresh_token:raise RuntimeError("Gmail mailbox is not connected")
         return GmailDeltaSync(settings,refresh_token),refresh_token
+    settings=mailbox_graph_settings(row.mailbox,settings)
     strategy=DelegatedGraphDeltaSync(settings,refresh_token,delegated_authority_tenant(row.mailbox.address,settings)) if refresh_token else GraphDeltaSync(settings)
     return strategy,refresh_token
 def _save_refreshed_mailbox_token(row:Email,strategy,refresh_token:str|None,settings)->None:
@@ -385,12 +387,22 @@ def mailbox_options(principal:dict=viewer,db:Session=Depends(get_db)):
 @router.post("/mailboxes",response_model=MailboxOut,dependencies=[admin],status_code=201)
 def create_mailbox(payload:MailboxCreate,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     if db.scalar(select(Mailbox).where(Mailbox.address==payload.address)):raise HTTPException(409,ui_text(db,"api.error.mailbox_exists"))
-    row=Mailbox(**payload.model_dump());db.add(row);db.flush();audit(db,request,"mailbox.create","success",principal["user_id"],"mailbox",row.id,{"provider":row.provider});db.commit();db.refresh(row);return row
+    values=payload.model_dump(exclude={"azure_client_id","azure_tenant_id","azure_client_secret"});row=Mailbox(**values);db.add(row);db.flush()
+    if payload.azure_client_id:
+        row.azure_client_id=payload.azure_client_id.strip();row.azure_tenant_id=payload.azure_tenant_id.strip();set_mailbox_azure_secret(row,payload.azure_client_secret)
+    audit(db,request,"mailbox.create","success",principal["user_id"],"mailbox",row.id,{"provider":row.provider});db.commit();db.refresh(row);return row
 @router.patch("/mailboxes/{mailbox_id}",response_model=MailboxOut,dependencies=[admin])
 def update_mailbox(mailbox_id:int,payload:MailboxUpdate,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     row=db.get(Mailbox,mailbox_id)
     if not row:raise HTTPException(404,ui_text(db,"api.error.mailbox_missing"))
-    for key,value in payload.model_dump(exclude_unset=True).items():setattr(row,key,value)
+    values=payload.model_dump(exclude_unset=True,exclude={"azure_client_id","azure_tenant_id","azure_client_secret"})
+    for key,value in values.items():setattr(row,key,value)
+    if any(value is not None for value in (payload.azure_client_id,payload.azure_tenant_id,payload.azure_client_secret)):
+        if row.provider!="microsoft":raise HTTPException(422,"Azure credentials require a Microsoft mailbox")
+        client_id=(payload.azure_client_id or row.azure_client_id or "").strip();tenant_id=(payload.azure_tenant_id or row.azure_tenant_id or "").strip()
+        if not client_id or not tenant_id or not (payload.azure_client_secret or row.azure_secret_ciphertext):raise HTTPException(422,"Azure Client ID, Tenant ID, and Client Secret are required")
+        row.azure_client_id=client_id;row.azure_tenant_id=tenant_id
+        if payload.azure_client_secret:set_mailbox_azure_secret(row,payload.azure_client_secret)
     audit(db,request,"mailbox.update","success",principal["user_id"],"mailbox",row.id,{"status":row.status.value});db.commit();db.refresh(row);return row
 @router.delete("/mailboxes/{mailbox_id}",dependencies=[admin],status_code=204)
 def delete_mailbox(mailbox_id:int,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
@@ -418,7 +430,7 @@ def start_mailbox_oauth(mailbox_id:int,request:Request,response:Response,princip
     row=db.get(Mailbox,mailbox_id)
     if not row:raise HTTPException(404,ui_text(db,"api.error.mailbox_missing"))
     if row.provider!="microsoft":raise HTTPException(409,ui_text(db,"api.error.microsoft_provider_required"))
-    settings=get_settings();authority_tenant=delegated_authority_tenant(row.address,settings);app=_delegated_graph_app(settings,authority_tenant);state,binding=new_oauth_values()
+    settings=mailbox_graph_settings(row,get_settings());authority_tenant=delegated_authority_tenant(row.address,settings);app=_delegated_graph_app(settings,authority_tenant);state,binding=new_oauth_values()
     try:
         flow=app.initiate_auth_code_flow(delegated_auth_code_scopes(settings),redirect_uri=settings.graph_redirect_uri,state=state,login_hint=row.address,prompt="consent")
     except Exception as exc:
@@ -430,7 +442,7 @@ def graph_oauth_callback(request:Request,db:Session=Depends(get_db)):
     try:transaction,payload=consume_transaction(db,request,request.query_params.get("state"),"microsoft");db.commit()
     except HTTPException:
         audit(db,request,"oauth.callback","denied",details={"provider":"microsoft","reason":"invalid_transaction"});db.commit();return _oauth_error(db,"oauth.failed.title")
-    settings=get_settings();app=_delegated_graph_app(settings,payload.get("authority_tenant"))
+    row=db.get(Mailbox,transaction.mailbox_id);settings=mailbox_graph_settings(row,get_settings()) if row else get_settings();app=_delegated_graph_app(settings,payload.get("authority_tenant"))
     if request.query_params.get("error"):
         detail=request.query_params.get("error_description") or request.query_params.get("error")
         audit(db,request,"oauth.callback","denied",transaction.user_id,"mailbox",transaction.mailbox_id,{"provider":"microsoft","reason":"provider_denied"});db.commit();return _oauth_error(db,"oauth.failed.title",400,detail)
@@ -754,8 +766,7 @@ async def trigger_sync(request:Request,principal:dict=admin,db:Session=Depends(g
     from app.services.jobs import run_sync_with_lease
     settings=get_settings();configured=list(db.scalars(select(Mailbox).where(Mailbox.status!=MailboxStatus.PAUSED)))
     if not configured:raise HTTPException(409,ui_text(db,"api.error.sync_no_mailbox"))
-    graph_app=bool(settings.azure_client_id and settings.azure_tenant_id and (settings.azure_client_secret or settings.azure_client_certificate_path))
-    microsoft_ready=all(bool(row.connected and settings.azure_client_id) or graph_app for row in configured if row.provider=="microsoft")
+    microsoft_ready=all(bool((configured_settings:=mailbox_graph_settings(row,settings)).azure_client_id and (row.connected or configured_settings.azure_tenant_id and (configured_settings.azure_client_secret or configured_settings.azure_client_certificate_path))) for row in configured if row.provider=="microsoft")
     gmail_ready=all(bool(row.connected and settings.google_client_id and settings.google_client_secret) for row in configured if row.provider=="gmail")
     if not microsoft_ready or not gmail_ready:raise HTTPException(503,ui_text(db,"api.error.mail_credentials_missing"))
     started=datetime.now(timezone.utc)

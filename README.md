@@ -24,7 +24,7 @@ The bootstrap Admin is created from `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN
 
 Create an Entra app registration, add Microsoft Graph **application** permissions `Mail.Read` and `Mail.Send`, and grant admin consent. The Exchange mailbox restriction below must cover both permissions. Delegated mailbox login requests `Mail.Read`, `Mail.Send`, and `User.Read`; existing connected accounts must sign in again to grant the send permission. Prefer a PEM certificate by setting `AZURE_CLIENT_CERTIFICATE_PATH` and `AZURE_CLIENT_CERTIFICATE_THUMBPRINT`; otherwise inject `AZURE_CLIENT_SECRET` from a secret manager. To rotate without downtime, deploy the new certificate/secret to one instance, verify token acquisition, roll it across remaining instances, and only then retire the previous credential.
 
-Admins can use the in-app setup guidance from **Mailboxes → Add mailbox**. Provider credentials are deployment-only secrets: the API and UI do not accept or write client secrets. Configure them through the deployment secret store, restart the API, run the connection check, then start OAuth for the exact mailbox.
+Admins can enter the Microsoft Azure Client ID, Tenant ID, and Client Secret in **Mailboxes → Add mailbox**. Submit saves the credentials for that mailbox; the client secret is encrypted in the database and is never returned by the API. Existing deployment environment credentials remain a fallback for mailboxes without saved credentials. Then run the connection check and start OAuth for the exact mailbox.
 
 Tenant admin consent and the Exchange mailbox restriction are mandatory and cannot be bypassed by OEIS.
 

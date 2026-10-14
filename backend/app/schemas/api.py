@@ -6,10 +6,21 @@ from pydantic import BaseModel, EmailStr, Field,field_validator,model_validator
 from app.models.entities import Classification,MailboxStatus, Role,SLATier
 
 class TokenResponse(BaseModel): access_token:str;token_type:str="bearer";expires_in:int
-class MailboxCreate(BaseModel): address:EmailStr;display_name:str=Field(min_length=1,max_length=120);provider:Literal["microsoft","gmail"]="microsoft";timezone:str="Asia/Kolkata"
-class MailboxUpdate(BaseModel): display_name:str|None=None;status:MailboxStatus|None=None;timezone:str|None=None
+class MailboxCreate(BaseModel):
+    address:EmailStr;display_name:str=Field(min_length=1,max_length=120);provider:Literal["microsoft","gmail"]="microsoft";timezone:str="Asia/Kolkata"
+    azure_client_id:str|None=Field(default=None,max_length=128);azure_tenant_id:str|None=Field(default=None,max_length=128);azure_client_secret:str|None=Field(default=None,max_length=2048)
+    @model_validator(mode="after")
+    def azure_fields_together(self):
+        fields=tuple(value.strip() if value else "" for value in (self.azure_client_id,self.azure_tenant_id,self.azure_client_secret))
+        if any(fields) and (self.provider!="microsoft" or not all(fields)):
+            raise ValueError("Microsoft mailbox requires Azure Client ID, Tenant ID, and Client Secret together")
+        return self
+class MailboxUpdate(BaseModel):
+    display_name:str|None=None;status:MailboxStatus|None=None;timezone:str|None=None
+    azure_client_id:str|None=Field(default=None,max_length=128);azure_tenant_id:str|None=Field(default=None,max_length=128);azure_client_secret:str|None=Field(default=None,max_length=2048)
 class MailboxOut(BaseModel):
     id:int;address:str;display_name:str;provider:str;status:MailboxStatus;timezone:str;connected:bool=False;last_synced_at:datetime|None;last_sync_error:str|None
+    azure_client_id:str|None=None;azure_tenant_id:str|None=None;azure_secret_saved:bool=False
     model_config={"from_attributes":True}
 class GraphCheckInput(BaseModel): mailbox:EmailStr|None=None
 class SyncSettingsInput(BaseModel):

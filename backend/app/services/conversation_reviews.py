@@ -14,7 +14,7 @@ from app.models.entities import AIReviewSetting, Classification, ConversationAIR
 from app.services.gmail import GmailDeltaSync
 from app.services.graph import DelegatedGraphDeltaSync, GraphDeltaSync, delegated_authority_tenant
 from app.services.security_events import audit
-from app.services.secrets import get_mailbox_token, set_mailbox_token
+from app.services.secrets import get_mailbox_token, set_mailbox_token,mailbox_graph_settings
 from app.services.writing_assistant import WritingAssistantError, review_employee_conversations
 from app.services.review_rubric import score_saved_review
 from app.services.ai_provider import active_ai_settings
@@ -66,6 +66,7 @@ def _strategy(email: Email, settings):
         if not token:
             raise RuntimeError("Gmail mailbox is not connected")
         return GmailDeltaSync(settings, token), token
+    settings=mailbox_graph_settings(email.mailbox,settings)
     strategy = DelegatedGraphDeltaSync(settings, token, delegated_authority_tenant(email.mailbox.address, settings)) if token else GraphDeltaSync(settings)
     return strategy, token
 

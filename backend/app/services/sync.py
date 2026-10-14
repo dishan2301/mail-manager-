@@ -8,7 +8,7 @@ from app.services.graph import DelegatedGraphDeltaSync,GraphDeltaSync,delegated_
 from app.services.gmail import GmailDeltaSync
 from app.services.sla import Calendar,elapsed_hours,tier_for
 from app.services.reply_detection import MessageRef,is_reply
-from app.services.secrets import get_mailbox_token,set_mailbox_token
+from app.services.secrets import get_mailbox_token,set_mailbox_token,mailbox_graph_settings
 
 def _text(value,max_length:int)->str:return str(value or "")[:max_length]
 def _headers(item:dict)->dict[str,str]:return {_text(h.get("name"),120).lower():_text(h.get("value"),8000) for h in item.get("internetMessageHeaders",[])[:200]}
@@ -34,6 +34,7 @@ async def sync_all_mailboxes():
         for mailbox in accounts:
             started=datetime.now(timezone.utc);fetched=new=0;error=None
             try:
+                mailbox_settings=mailbox_graph_settings(mailbox,settings) if mailbox.provider=="microsoft" else settings
                 calendar_row=db.scalar(select(BusinessCalendar).where(BusinessCalendar.mailbox_id==mailbox.id)) or db.scalar(select(BusinessCalendar).where(BusinessCalendar.mailbox_id.is_(None)))
                 calendar=Calendar(timezone=mailbox.timezone,start=time.fromisoformat(calendar_row.workday_start) if calendar_row else time(9),end=time.fromisoformat(calendar_row.workday_end) if calendar_row else time(18),weekdays=tuple(calendar_row.weekdays) if calendar_row else (0,1,2,3,4),holidays=frozenset(date.fromisoformat(x) for x in calendar_row.holidays) if calendar_row else frozenset())
                 now=datetime.now(timezone.utc)
@@ -47,7 +48,7 @@ async def sync_all_mailboxes():
                     strategy=GmailDeltaSync(settings,refresh_token)
                 else:
                     if personal_domain and not refresh_token:raise RuntimeError("Click Connect Outlook and complete Microsoft login before Sync")
-                    strategy=DelegatedGraphDeltaSync(settings,refresh_token,delegated_authority_tenant(mailbox.address,settings)) if refresh_token else GraphDeltaSync(settings)
+                    strategy=DelegatedGraphDeltaSync(mailbox_settings,refresh_token,delegated_authority_tenant(mailbox.address,mailbox_settings)) if refresh_token else GraphDeltaSync(mailbox_settings)
                 items,delta=await strategy.sync_mailbox(mailbox.address,mailbox.delta_link);fetched=len(items)
                 if mailbox.provider=="microsoft" and refresh_token:mailbox.graph_auth_type="delegated";set_mailbox_token(mailbox,strategy.latest_refresh_token,settings)
                 for item in items:
