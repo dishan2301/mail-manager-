@@ -2114,7 +2114,7 @@ export default function ProductionApp() {
     ),
     [page, setPage] = useState(Number(initialQuery.get("page")) || 1),
     [settingsView, setSettingsView] = useState("sla-rules"),
-    [aiConfig, setAiConfig] = useState<{provider:string;model:string;configured:Record<string,boolean>;models:Record<string,Record<string,string>>}|null>(null),
+    [aiConfig, setAiConfig] = useState<{provider:string;model:string;configured:Record<string,boolean>;models:Record<string,Record<string,string>>;last_check?:{ok:boolean;message:string;model:string;tested_at:string}|null}|null>(null),
     [aiKey, setAiKey] = useState(""),
     [savingAiConfig, setSavingAiConfig] = useState(false),
     [testingAiConfig, setTestingAiConfig] = useState(false),
@@ -2935,7 +2935,7 @@ export default function ProductionApp() {
   const testAiConfig = async () => {
     setTestingAiConfig(true);
     setAiTestResult(null);
-    try { setAiTestResult(await api("/settings/ai-provider/test", token, { method: "POST" })); }
+    try { const result=await api("/settings/ai-provider/test", token, { method: "POST" }); setAiTestResult(result); setAiConfig((current) => current ? { ...current, last_check: result } : current); }
     catch (e) { setAiTestResult({ ok:false, message:e instanceof Error ? e.message : "AI connection test failed", model:aiConfig?.model || "", tested_at:new Date().toISOString() }); }
     finally { setTestingAiConfig(false); }
   };
@@ -3533,6 +3533,8 @@ export default function ProductionApp() {
                   <Button variant="outlined" disabled={testingAiConfig || savingAiConfig} onClick={testAiConfig}>{testingAiConfig ? "Testing…" : "Test saved connection"}</Button>
                   <Typography variant="caption">Save your provider and model first. This test sends only synthetic text and may use a few provider tokens.</Typography>
                   {aiTestResult && <Alert severity={aiTestResult.ok ? "success" : "error"}>{aiTestResult.message} Model: {aiTestResult.model}. Tested {new Date(aiTestResult.tested_at).toLocaleString()}.</Alert>}
+                  {!aiTestResult && aiConfig.last_check && <Alert severity={aiConfig.last_check.ok ? "success" : "warning"}>Last automatic or manual check: {aiConfig.last_check.message} Model: {aiConfig.last_check.model}. Tested {new Date(aiConfig.last_check.tested_at).toLocaleString()}.{!aiConfig.last_check.ok && " Check the saved key or model, then retry."}</Alert>}
+                  <Typography variant="caption">When scheduling is enabled, OEIS tests the saved model once daily with synthetic text. It never changes your provider or model automatically.</Typography>
                 </Box>
               )}
               {section !== "Settings" && section !== "AI Settings" && (

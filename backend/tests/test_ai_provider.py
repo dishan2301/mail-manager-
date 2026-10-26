@@ -44,3 +44,22 @@ def test_connection_uses_saved_model_and_hides_provider_error(monkeypatch):
     assert requests[0][1]["model"] == "selected-model"
     assert requests[0][1]["messages"][0]["content"] == "Reply with OK."
     assert "test-private-key" not in str(result)
+
+
+def test_saved_connection_check_is_visible_after_restart_and_contains_no_key(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    settings = Settings.model_construct(ai_api_key="private-test-key", ai_api_base_url="https://openrouter.ai/api/v1", ai_model="selected-model")
+    monkeypatch.setattr(ai_provider, "get_settings", lambda: settings)
+    async def probe(_settings):
+        assert _settings.ai_model == "selected-model"
+        return {"ok": False, "status_code": 404, "message": "AI provider returned HTTP 404. Choose another model."}
+    monkeypatch.setattr(ai_provider, "test_ai_connection", probe)
+    with Session(engine) as db:
+        result = asyncio.run(ai_provider.run_saved_ai_connection_check(db))
+        assert result["ok"] is False
+    with Session(engine) as db:
+        last = ai_provider.provider_status(db, settings)["last_check"]
+        assert last["ok"] is False and last["model"] == "selected-model"
+        assert "private-test-key" not in str(last)
+    engine.dispose()

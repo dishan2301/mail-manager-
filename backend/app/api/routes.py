@@ -30,7 +30,7 @@ from app.services.secrets import get_mailbox_token,set_mailbox_token,set_mailbox
 from app.services.oauth_transactions import _digest,clear_oauth_cookie,consume_transaction,new_oauth_values,pkce_pair,save_transaction
 from app.services.authorization import mailbox_scope,require_email_scope
 from app.services.writing_assistant import WritingAssistantError,suggest_reply
-from app.services.ai_provider import active_ai_settings,provider_status,save_ai_settings,test_ai_connection
+from app.services.ai_provider import active_ai_settings,provider_status,save_ai_settings,run_saved_ai_connection_check
 from app.services.conversation_reviews import REVIEW_VERSION,_review_activity,_thread_rows
 from app.services.notifications import report_mailbox_available
 from app.services.sla import Calendar,elapsed_hours,tier_for
@@ -666,9 +666,7 @@ def get_ai_provider(db:Session=Depends(get_db)):
     return provider_status(db)
 @router.post("/settings/ai-provider/test",dependencies=[admin])
 async def test_saved_ai_provider(db:Session=Depends(get_db)):
-    settings=active_ai_settings(db,get_settings())
-    result=await test_ai_connection(settings)
-    return {**result,"model":settings.ai_model,"tested_at":datetime.now(timezone.utc)}
+    return await run_saved_ai_connection_check(db)
 @router.patch("/settings/ai-provider",dependencies=[admin])
 def update_ai_provider(payload:dict,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     provider=payload.get("provider");model=payload.get("model");api_key=payload.get("api_key")
@@ -785,7 +783,7 @@ def update_sync_settings(payload:SyncSettingsInput,request:Request,principal:dic
     if scheduler:
         from app.services.jobs import sync_job
         apply_sync_settings(scheduler,sync_job,payload.interval_seconds,payload.scheduler_enabled)
-        for job_id in ("daily-summary",):
+        for job_id in ("daily-summary","daily-ai-connection"):
             (scheduler.resume_job if payload.scheduler_enabled else scheduler.pause_job)(job_id)
     audit(db,request,"settings.sync.update","success",principal["user_id"],details={"interval_seconds":payload.interval_seconds,"scheduler_enabled":payload.scheduler_enabled});db.commit()
     job=scheduler.get_job("mailbox-sync") if scheduler else None

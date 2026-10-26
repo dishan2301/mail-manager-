@@ -15,6 +15,7 @@ from app.services.notifications import send_html
 from app.services.sync import sync_all_mailboxes
 from app.services.conversation_reviews import review_new_or_changed_conversations
 from app.services.sync_health import mailbox_freshness
+from app.services.ai_provider import run_saved_ai_connection_check
 
 
 logger=logging.getLogger(__name__)
@@ -134,3 +135,11 @@ async def daily_summary_job(recipient_email:str|None=None):
 
 async def conversation_ai_review_job():
     return await _run_with_lease("oeis:conversation-ai-review",review_new_or_changed_conversations,6*60*60)
+
+
+async def daily_ai_connection_job():
+    async def operation():
+        with SessionLocal() as db:
+            await run_saved_ai_connection_check(db)
+        return True
+    return await _run_with_lease("oeis:daily-ai-connection", operation, 60)

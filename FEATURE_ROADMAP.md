@@ -15,10 +15,10 @@ There is no fixed calendar promise. Advance when each phase's acceptance checks 
 ### Progress on `testing`
 
 - Phase 0: an automated two-round, shared-To conversation fixture now protects the message and reply-credit baseline. Remaining baseline fixtures and a recorded before/after count export are still needed before a status migration.
-- F5: the saved provider/model can be tested on demand using synthetic text; HTTP errors are shown without provider response bodies or keys. The proposed daily automatic AI check is still open.
+- F5: the saved provider/model can be tested on demand or once daily when scheduling is enabled, using synthetic text. The latest result and timestamp persist in AI Settings; HTTP errors appear without provider response bodies or keys. No automatic model change occurs. Controlled-provider validation in the test deployment remains before release.
 - F1: each active mailbox is assessed independently, with a dashboard/Mailboxes warning after `SYNC_STALE_AFTER_SECONDS` (default 900) and one admin email per stale period when delivery works. Test this with a controlled mailbox in the test deployment before release.
 - F2: observer and direct duplicate customer inbox copies now have separate statuses in sync, dashboard, pending-mail filters, and reports. A reversible `0017` migration was rehearsed on a copy of the local `0014` snapshot; [F2_MIGRATION.md](F2_MIGRATION.md) records counts and rollback. Reply credit and report tests pass. Test deployment validation and review remain before release.
-- Remaining Phase 1: the proposed daily automatic F5 provider check is still open. F1 and F2 also need controlled-account/test-deployment validation before release.
+- Remaining Phase 1 release gate: validate F5 with a controlled AI account and F1/F2 with a controlled mailbox in the test deployment, compare counts, and review before merging to `main`.
 
 ## Phase 0 — Baseline and metric definitions
 

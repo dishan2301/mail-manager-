@@ -368,6 +368,8 @@ def test_continuous_review_schedule_starts_immediately_and_checks_every_30_secon
     assert job.trigger.interval.total_seconds() == 30
     assert abs((job.next_run_time-before).total_seconds()) < 2
     assert job.max_instances == 1 and job.coalesce is True
+    daily = scheduler.build_scheduler(operation, operation, operation, operation).get_job("daily-ai-connection")
+    assert "hour='18'" in str(daily.trigger) and "minute='1'" in str(daily.trigger)
 
 
 def test_five_conversations_are_reviewed_independently(report_db, monkeypatch):

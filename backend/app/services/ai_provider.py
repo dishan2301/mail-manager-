@@ -1,7 +1,8 @@
 import httpx
+from datetime import datetime, timezone
 
 from app.core.config import Settings, get_settings
-from app.models.entities import AIProviderSetting
+from app.models.entities import AIConnectionCheck, AIProviderSetting
 from app.services.secrets import SecretCipher
 
 MODELS = {
@@ -45,9 +46,12 @@ def provider_status(db, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     row = db.get(AIProviderSetting, 1)
     provider = row.provider if row else next((name for name, url in BASE_URLS.items() if url.split("/")[2] in settings.ai_api_base_url), "openrouter")
+    check = db.get(AIConnectionCheck, 1)
     return {"provider": provider, "model": row.model if row else settings.ai_model,
             "configured": {name: bool(_stored_key(row, name, settings)) for name in MODELS},
-            "models": MODELS}
+            "models": MODELS,
+            "last_check": {"ok": check.ok, "message": check.message, "model": check.model,
+                           "tested_at": check.checked_at} if check else None}
 
 def active_ai_settings(db, settings: Settings | None = None) -> Settings:
     settings = settings or get_settings()
@@ -85,6 +89,17 @@ async def test_ai_connection(settings: Settings) -> dict:
         content = None
     valid = isinstance(content, str) and bool(content.strip())
     return {"ok": valid, "message": "AI connection works." if valid else "AI provider returned no usable response."}
+
+
+async def run_saved_ai_connection_check(db) -> dict:
+    settings = active_ai_settings(db, get_settings())
+    result = await test_ai_connection(settings)
+    now = datetime.now(timezone.utc)
+    check = db.get(AIConnectionCheck, 1) or AIConnectionCheck(id=1)
+    check.model, check.ok, check.message, check.checked_at = settings.ai_model, result["ok"], result["message"], now
+    db.add(check)
+    db.commit()
+    return {**result, "model": settings.ai_model, "tested_at": now}
 
 def save_ai_settings(db, provider: str, model: str, api_key: str | None, settings: Settings | None = None) -> dict:
     if provider not in MODELS or model not in MODELS[provider]:
