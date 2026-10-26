@@ -19,7 +19,7 @@ def test_replied_email_is_not_current_critical_work():
         db.add(Email(mailbox_id=mailbox.id, message_id="one", sender="customer@example.com", receiver=mailbox.address,
                      subject="Answered", received_time=datetime.now(timezone.utc), folder="inbox",
                      classification=Classification.CUSTOMER, status=EmailStatus.REPLIED,
-                     sla_tier=SLATier.CRITICAL, assigned_employee_id=employee.id))
+                     sla_tier=SLATier.CRITICAL, assigned_employee_id=employee.id, responder_employee_id=employee.id))
         db.commit()
         row = EmailRepository(db).employee_performance()[0]
     assert row["replied"] == 1

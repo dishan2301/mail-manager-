@@ -11,7 +11,7 @@ from fastapi import APIRouter,Depends,HTTPException,Query,Request,Response,statu
 from fastapi.responses import HTMLResponse,StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 import httpx
-from sqlalchemy import delete,func,or_,select
+from sqlalchemy import and_,delete,func,or_,select
 from sqlalchemy.orm import Session,joinedload,selectinload
 from app.core.database import SessionLocal,get_db
 from app.core.config import BACKEND_ENV,get_settings
@@ -292,11 +292,11 @@ async def check_gmail(payload:GraphCheckInput,db:Session=Depends(get_db)):
 @router.get("/emails/pending",dependencies=[viewer])
 def pending(page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),status_filter:str|None=Query(None,alias="status"),mailbox:int|None=None,employee:int|None=None,search:str|None=None,date_filter:str|None=None,principal:dict=viewer,db:Session=Depends(get_db)):
     rows,total=EmailRepository(db).pending(page,page_size,status_filter,mailbox,employee,search,date_filter,mailbox_scope(db,principal))
-    return {"items":[{"serial_number":(page-1)*page_size+i,"id":e.id,"customer":e.sender,"email":e.sender,"from":e.sender,"to":e.receiver,"subject":e.subject,"mailbox":e.mailbox.address,"mailbox_timezone":e.mailbox.timezone,"received":_utc_timestamp(e.received_time),"read_at":_utc_timestamp(e.read_at),"pending_since":_utc_timestamp(e.received_time),"replied_at":_utc_timestamp(e.replied_at),"hours":e.pending_hours,"assigned_employee":", ".join(recipient.employee.name for recipient in e.recipients) if e.status==EmailStatus.PENDING and e.recipients else e.employee.name if e.employee else None,"replied_by":e.employee.name if e.status==EmailStatus.REPLIED and e.employee else None,"reply_outcome":("Replied by you" if e.assigned_employee_id==employee else "Not replied by you") if employee and e.status==EmailStatus.REPLIED else None,"priority":e.sla_tier.value,"status":e.status.value} for i,e in enumerate(rows,1)],"page":page,"page_size":page_size,"total":total}
+    return {"items":[{"serial_number":(page-1)*page_size+i,"id":e.id,"customer":e.sender,"email":e.sender,"from":e.sender,"to":e.receiver,"subject":e.subject,"mailbox":e.mailbox.address,"mailbox_timezone":e.mailbox.timezone,"received":_utc_timestamp(e.received_time),"read_at":_utc_timestamp(e.read_at),"pending_since":_utc_timestamp(e.received_time),"replied_at":_utc_timestamp(e.replied_at),"hours":e.pending_hours,"assigned_employee":", ".join(recipient.employee.name for recipient in e.recipients) if e.status==EmailStatus.PENDING and e.recipients else e.employee.name if e.employee else None,"replied_by":e.responder.name if e.status==EmailStatus.REPLIED and e.responder else None,"reply_outcome":("Replied by you" if e.responder_employee_id==employee else "Not replied by you") if employee and e.status==EmailStatus.REPLIED else None,"priority":e.sla_tier.value,"status":e.status.value} for i,e in enumerate(rows,1)],"page":page,"page_size":page_size,"total":total}
 @router.get("/emails/{email_id}",dependencies=[viewer])
 def email_detail(email_id:int,principal:dict=viewer,db:Session=Depends(get_db)):
     row=require_email_scope(db,principal,db.get(Email,email_id))
-    return {"id":row.id,"message_id":row.message_id,"conversation_id":row.conversation_id,"internet_message_id":row.internet_message_id,"sender":row.sender,"receiver":row.receiver,"subject":row.subject,"received_time":_utc_timestamp(row.received_time),"sent_time":_utc_timestamp(row.sent_time),"mailbox_timezone":row.mailbox.timezone,"folder":row.folder,"categories":row.categories,"classification":row.classification,"status":row.status,"read_at":_utc_timestamp(row.read_at),"replied_at":_utc_timestamp(row.replied_at),"pending_hours":row.pending_hours,"sla_tier":row.sla_tier,"assigned_employee_id":row.assigned_employee_id}
+    return {"id":row.id,"message_id":row.message_id,"conversation_id":row.conversation_id,"internet_message_id":row.internet_message_id,"sender":row.sender,"receiver":row.receiver,"subject":row.subject,"received_time":_utc_timestamp(row.received_time),"sent_time":_utc_timestamp(row.sent_time),"mailbox_timezone":row.mailbox.timezone,"folder":row.folder,"categories":row.categories,"classification":row.classification,"status":row.status,"read_at":_utc_timestamp(row.read_at),"replied_at":_utc_timestamp(row.replied_at),"pending_hours":row.pending_hours,"sla_tier":row.sla_tier,"assigned_employee_id":row.assigned_employee_id,"responder_employee_id":row.responder_employee_id}
 @router.patch("/emails/{email_id}/read",dependencies=[admin])
 def mark_email_read(email_id:int,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     row=require_email_scope(db,principal,db.get(Email,email_id))
@@ -364,6 +364,7 @@ async def send_email_reply(email_id:int,payload:ReplyInput,request:Request,princ
             raise HTTPException(409,"Outlook needs Mail.Send permission. Reconnect this mailbox and approve Mail.Send, then retry. If it still fails, ask your Microsoft admin to verify the Mail.Send permission and mailbox access policy.") from exc
         raise HTTPException(502,"Reply could not be sent through the mailbox provider") from exc
     row.status=EmailStatus.REPLIED;row.replied_at=datetime.now(timezone.utc)
+    row.responder_employee_id=db.scalar(select(Employee.id).where(func.lower(Employee.email)==row.mailbox.address.strip().casefold()))
     calendar_row=db.scalar(select(BusinessCalendar).where(BusinessCalendar.mailbox_id==row.mailbox_id)) or db.scalar(select(BusinessCalendar).where(BusinessCalendar.mailbox_id.is_(None)))
     calendar=Calendar(timezone=row.mailbox.timezone,start=dt_time.fromisoformat(calendar_row.workday_start) if calendar_row else dt_time(9),end=dt_time.fromisoformat(calendar_row.workday_end) if calendar_row else dt_time(18),weekdays=tuple(calendar_row.weekdays) if calendar_row else (0,1,2,3,4),holidays=frozenset(date.fromisoformat(day) for day in calendar_row.holidays) if calendar_row else frozenset())
     rules=list(db.scalars(select(SLARule)));thresholds={rule.tier:rule.threshold_hours for rule in rules};business_only=all(rule.business_hours_only for rule in rules) if rules else True
@@ -375,7 +376,7 @@ def assign_email(email_id:int,request:Request,employee_id:int|None=None,principa
     row=db.get(Email,email_id)
     if not row:raise HTTPException(404,"Email not found")
     if employee_id is not None and not db.get(Employee,employee_id):raise HTTPException(404,"Employee not found")
-    row.assigned_employee_id=employee_id;audit(db,request,"email.assignment.update","success",principal["user_id"],"email",email_id,{"employee_id":employee_id});db.commit();return {"id":row.id,"assigned_employee_id":employee_id}
+    row.assigned_employee_id=employee_id;row.assignment_overridden=True;audit(db,request,"email.assignment.update","success",principal["user_id"],"email",email_id,{"employee_id":employee_id});db.commit();return {"id":row.id,"assigned_employee_id":employee_id}
 @router.patch("/emails/{email_id}/status",dependencies=[admin])
 def update_email_status(email_id:int,payload:dict,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     row=db.get(Email,email_id)
@@ -385,7 +386,7 @@ def update_email_status(email_id:int,payload:dict,request:Request,principal:dict
     if status in {EmailStatus.OBSERVER_COPY,EmailStatus.DUPLICATE_COPY}:raise HTTPException(422,"Copy statuses are set by synchronization")
     row.status=status
     row.manually_ignored=status==EmailStatus.IGNORED
-    if status != EmailStatus.REPLIED: row.replied_at=None
+    if status != EmailStatus.REPLIED: row.replied_at=None;row.responder_employee_id=None
     audit(db,request,"email.status.update","success",principal["user_id"],"email",email_id,{"status":status.value})
     db.commit()
     return {"id":row.id,"status":status.value}
@@ -611,6 +612,7 @@ def report(period:str,dimension:str=Query(...,pattern="^(department|employee|cus
     for e in rows:
         participants={recipient.employee_id:recipient.employee for recipient in e.recipients}
         if e.employee:participants[e.employee.id]=e.employee
+        if e.responder:participants[e.responder.id]=e.responder
         if dimension in {"employee","department"}:
             entries={}
             for person in participants.values():
@@ -619,7 +621,7 @@ def report(period:str,dimension:str=Query(...,pattern="^(department|employee|cus
                 if department and person.department!=department:continue
                 group_id=("employee",person.id) if dimension=="employee" else person.department or "General"
                 if group_id not in entries:entries[group_id]=[person,False]
-                entries[group_id][1] |= person.id==e.assigned_employee_id
+                entries[group_id][1] |= person.id==e.responder_employee_id
         else:entries={key(e):[None,True]}
         if not participants and dimension in {"employee","department"}:entries={key(e):[None,True]}
         for group_id,(person,owns_credit) in entries.items():
@@ -639,7 +641,7 @@ def employee_mail_report(period:str,employee_id:int,principal:dict=viewer,db:Ses
     cutoff=_report_cutoff(period); allowed=mailbox_scope(db,principal); scope=[Email.folder=="inbox",Email.received_time>=cutoff,employee_mail_scope(employee_id)]
     if allowed is not None: scope.append(Email.mailbox_id.in_(allowed))
     rows=list(db.scalars(select(Email).options(joinedload(Email.mailbox),joinedload(Email.employee)).where(*scope).order_by(Email.received_time.desc()).limit(get_settings().max_report_rows)))
-    return {"period":period,"period_start":cutoff,"employee_id":employee_id,"mails":[{"id":e.id,"sender":e.sender,"receiver":e.receiver,"subject":e.subject or "(no subject)","received_at":_utc_timestamp(e.received_time),"status":e.status.value,"status_label":("Replied by you" if e.assigned_employee_id==employee_id else f"Not replied by you · Replied by {e.employee.name if e.employee else 'another employee'}") if e.status==EmailStatus.REPLIED else e.status.value,"replied_by":e.employee.name if e.status==EmailStatus.REPLIED and e.employee else None,"replied_by_you":e.status==EmailStatus.REPLIED and e.assigned_employee_id==employee_id,"classification":e.classification.value if e.classification else None,"sla_tier":e.sla_tier.value if e.sla_tier else None,"reply_hours":e.pending_hours,"reason":f"{e.classification.value if e.classification else 'Customer'} mail · {e.sla_tier.value if e.sla_tier else 'healthy'} SLA · {e.status.value}"} for e in rows]}
+    return {"period":period,"period_start":cutoff,"employee_id":employee_id,"mails":[{"id":e.id,"sender":e.sender,"receiver":e.receiver,"subject":e.subject or "(no subject)","received_at":_utc_timestamp(e.received_time),"status":e.status.value,"status_label":("Replied by you" if e.responder_employee_id==employee_id else f"Not replied by you · Replied by {e.responder.name if e.responder else 'unknown responder'}") if e.status==EmailStatus.REPLIED else e.status.value,"replied_by":e.responder.name if e.status==EmailStatus.REPLIED and e.responder else None,"replied_by_you":e.status==EmailStatus.REPLIED and e.responder_employee_id==employee_id,"classification":e.classification.value if e.classification else None,"sla_tier":e.sla_tier.value if e.sla_tier else None,"reply_hours":e.pending_hours,"reason":f"{e.classification.value if e.classification else 'Customer'} mail · {e.sla_tier.value if e.sla_tier else 'healthy'} SLA · {e.status.value}"} for e in rows]}
 def _xlsx_value(value):
     if isinstance(value,str) and value.startswith(("=","+","-","@","\t","\r","\n")):return "'"+value
     return value
@@ -704,7 +706,7 @@ def employee_ai_review(period:str,employee_id:int,page:int=Query(1,ge=1),page_si
     if not employee:raise HTTPException(404,ui_text(db,"api.error.employee_missing"))
     cutoff=_report_cutoff(period)
     allowed=mailbox_scope(db,principal);scope=[] if allowed is None else [Email.mailbox_id.in_(allowed)]
-    incoming=list(db.scalars(select(Email).where(Email.folder=="inbox",Email.classification==Classification.CUSTOMER,Email.assigned_employee_id==employee_id,Email.received_time>=cutoff,*scope).order_by(Email.received_time,Email.id)))
+    incoming=list(db.scalars(select(Email).where(Email.folder=="inbox",Email.classification==Classification.CUSTOMER,or_(and_(Email.status==EmailStatus.PENDING,Email.assigned_employee_id==employee_id),and_(Email.status==EmailStatus.REPLIED,Email.responder_employee_id==employee_id)),Email.received_time>=cutoff,*scope).order_by(Email.received_time,Email.id)))
     warning_rule=db.scalar(select(SLARule).where(SLARule.tier==SLATier.WARNING))
     keys=[];subjects={};messages_by_key={}
     for email in incoming:

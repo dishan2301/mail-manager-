@@ -133,6 +133,7 @@ def reconcile_replies(db,employees):
     for copies in groups.values():
         direct=[row for row in copies if mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")}]
         primary=(direct or copies)[0]
+        owner_id=primary.assigned_employee_id if primary.assignment_overridden or primary.status==EmailStatus.REPLIED else None
         source=MessageRef(primary.internet_message_id,primary.conversation_id,primary.subject,primary.received_time)
         matches=[]
         copy_ids={row.id for row in copies}
@@ -152,13 +153,14 @@ def reconcile_replies(db,employees):
         for row in copies:
             for recipient in recipients_by_email.get(row.id,[]):db.delete(recipient)
             row.status=(EmailStatus.IGNORED if row.manually_ignored else EmailStatus.DUPLICATE_COPY if row is not primary and mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")} else EmailStatus.OBSERVER_COPY if row.classification.value=="Customer" else EmailStatus.IGNORED)
-            row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+            row.assigned_employee_id=None;row.responder_employee_id=None;row.replied_at=None;row.pending_hours=0
         if primary.manually_ignored:continue
         if _assignee(primary.receiver,"",employees) is None and match is None:continue
         to_ids={employees_by_address[address.strip().casefold()] for address in primary.receiver.replace(";",",").split(",") if address.strip().casefold() in employees_by_address}
         for employee_id in to_ids:db.add(EmailRecipient(email_id=primary.id,employee_id=employee_id))
         primary.status=EmailStatus.REPLIED if match else EmailStatus.PENDING
-        primary.assigned_employee_id=employees_by_address[match.sender.strip().casefold()] if match else _assignee(primary.receiver,mailboxes[primary.mailbox_id].address,employees)
+        primary.assigned_employee_id=owner_id if primary.assignment_overridden else owner_id or _assignee(primary.receiver,mailboxes[primary.mailbox_id].address,employees)
+        primary.responder_employee_id=employees_by_address[match.sender.strip().casefold()] if match else None
         primary.replied_at=(match.sent_time or match.received_time) if match else None
         mailbox=mailboxes[primary.mailbox_id];saved=calendars.get(mailbox.id) or calendars.get(None)
         calendar=Calendar(timezone=mailbox.timezone,start=time.fromisoformat(saved.workday_start) if saved else time(9),end=time.fromisoformat(saved.workday_end) if saved else time(18),weekdays=tuple(saved.weekdays) if saved else (0,1,2,3,4),holidays=frozenset(date.fromisoformat(value) for value in saved.holidays) if saved else frozenset())
@@ -169,7 +171,7 @@ def reconcile_replies(db,employees):
         identity=(row.internet_message_id or "").strip().casefold() or (row.mailbox_id,row.message_id)
         if row.folder=="inbox" and identity in response_ids:
             for recipient in list(db.scalars(select(EmailRecipient).where(EmailRecipient.email_id==row.id))):db.delete(recipient)
-            row.status=EmailStatus.IGNORED if row.manually_ignored else EmailStatus.OBSERVER_COPY;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+            row.status=EmailStatus.IGNORED if row.manually_ignored else EmailStatus.OBSERVER_COPY;row.assigned_employee_id=None;row.responder_employee_id=None;row.replied_at=None;row.pending_hours=0
 
 
 def _utc(value):

@@ -5,11 +5,11 @@ from sqlalchemy.orm import Session,joinedload,selectinload
 from app.models.entities import Email,EmailRecipient,EmailStatus,Employee,Mailbox,SLATier
 
 def employee_mail_scope(employee_id):
-    return or_(Email.assigned_employee_id==employee_id,select(EmailRecipient.email_id).where(EmailRecipient.email_id==Email.id,EmailRecipient.employee_id==employee_id).correlate(Email,Employee).exists())
+    return or_(Email.assigned_employee_id==employee_id,Email.responder_employee_id==employee_id,select(EmailRecipient.email_id).where(EmailRecipient.email_id==Email.id,EmailRecipient.employee_id==employee_id).correlate(Email,Employee).exists())
 
 
 def employee_reply_credit(employee_id):
-    return and_(Email.status==EmailStatus.REPLIED,Email.assigned_employee_id==employee_id)
+    return and_(Email.status==EmailStatus.REPLIED,Email.responder_employee_id==employee_id)
 
 
 class EmailRepository:
@@ -57,7 +57,7 @@ class EmailRepository:
     def employee_performance(self,mailbox_ids:list[int]|None=None):
         join=employee_mail_scope(Employee.id)
         if mailbox_ids is not None:join=and_(join,Email.mailbox_id.in_(mailbox_ids))
-        rows=self.db.execute(select(Employee.id,Employee.name,Employee.department,func.count(Email.id),func.sum(case((employee_reply_credit(Employee.id),1),else_=0)),func.avg(case((employee_reply_credit(Employee.id),Email.pending_hours),else_=None)),func.sum(case((Email.status==EmailStatus.PENDING,1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.PENDING,Email.sla_tier==SLATier.CRITICAL),1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.PENDING,Email.sla_tier==SLATier.WARNING),1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.PENDING,Email.sla_tier==SLATier.HEALTHY),1),else_=0)),func.sum(case((Email.status==EmailStatus.IGNORED,1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.REPLIED,Email.assigned_employee_id!=Employee.id),1),else_=0))).outerjoin(Email,join).where(Employee.active.is_(True),func.lower(func.trim(Employee.email)).like("%@indianinfotech.org")).group_by(Employee.id,Employee.name,Employee.department)).all()
+        rows=self.db.execute(select(Employee.id,Employee.name,Employee.department,func.count(Email.id),func.sum(case((employee_reply_credit(Employee.id),1),else_=0)),func.avg(case((employee_reply_credit(Employee.id),Email.pending_hours),else_=None)),func.sum(case((Email.status==EmailStatus.PENDING,1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.PENDING,Email.sla_tier==SLATier.CRITICAL),1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.PENDING,Email.sla_tier==SLATier.WARNING),1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.PENDING,Email.sla_tier==SLATier.HEALTHY),1),else_=0)),func.sum(case((Email.status==EmailStatus.IGNORED,1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.REPLIED,or_(Email.responder_employee_id.is_(None),Email.responder_employee_id!=Employee.id)),1),else_=0))).outerjoin(Email,join).where(Employee.active.is_(True),func.lower(func.trim(Employee.email)).like("%@indianinfotech.org")).group_by(Employee.id,Employee.name,Employee.department)).all()
         return [{"id":r[0],"employee":r[1],"department":r[2],"total":r[3] or 0,"received":r[3] or 0,"replied":r[4] or 0,"average_reply_time":float(r[5] or 0),"pending":r[6] or 0,"critical":r[7] or 0,"warning":r[8] or 0,"healthy":r[9] or 0,"ignored":r[10] or 0,"resolved":r[4] or 0,"replied_by_other":r[11] or 0} for r in rows]
     def employee_connections(self,mailbox_ids:list[int]|None=None,limit:int=8):
         join=employee_mail_scope(Employee.id)
@@ -72,7 +72,7 @@ class EmailRepository:
             filters.extend([Email.received_time>=start,Email.received_time<end])
         elif days is not None:filters.append(Email.received_time>=cutoff)
         if mailbox_ids is not None:filters.append(Email.mailbox_id.in_(mailbox_ids))
-        rows=self.db.execute(select(func.date(Email.received_time),func.count(Email.id),func.sum(case((employee_reply_credit(employee_id),1),else_=0)),func.sum(case((Email.status==EmailStatus.PENDING,1),else_=0)),func.sum(case((Email.status==EmailStatus.IGNORED,1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.REPLIED,Email.assigned_employee_id!=employee_id),1),else_=0))).where(*filters).group_by(func.date(Email.received_time))).all()
+        rows=self.db.execute(select(func.date(Email.received_time),func.count(Email.id),func.sum(case((employee_reply_credit(employee_id),1),else_=0)),func.sum(case((Email.status==EmailStatus.PENDING,1),else_=0)),func.sum(case((Email.status==EmailStatus.IGNORED,1),else_=0)),func.sum(case((and_(Email.status==EmailStatus.REPLIED,or_(Email.responder_employee_id.is_(None),Email.responder_employee_id!=employee_id)),1),else_=0))).where(*filters).group_by(func.date(Email.received_time))).all()
         if days is None and year is None:return [{"date":str(r[0]),"received":r[1],"replied":r[2],"pending":r[3],"ignored":r[4],"replied_by_other":r[5]} for r in rows]
         if year is not None:
             start=datetime(year,1,1,tzinfo=timezone.utc);days_in_year=(datetime(year+1,1,1,tzinfo=timezone.utc)-start).days
@@ -87,7 +87,7 @@ class EmailRepository:
         end=start+timedelta(days=3)
         filters=[employee_mail_scope(employee_id),Email.folder=="inbox",Email.received_time>=start,Email.received_time<end]
         if mailbox_ids is not None:filters.append(Email.mailbox_id.in_(mailbox_ids))
-        rows=self.db.execute(select(Email.received_time,Email.status,Mailbox.timezone,Email.assigned_employee_id).join(Mailbox,Mailbox.id==Email.mailbox_id).where(*filters)).all()
+        rows=self.db.execute(select(Email.received_time,Email.status,Mailbox.timezone,Email.responder_employee_id).join(Mailbox,Mailbox.id==Email.mailbox_id).where(*filters)).all()
         buckets={slot:{"slot":slot,"received":0,"replied":0,"pending":0} for slot in range(48)}
         for received_time,status,timezone_name,responder_id in rows:
             local_time=received_time.replace(tzinfo=timezone.utc) if received_time.tzinfo is None else received_time

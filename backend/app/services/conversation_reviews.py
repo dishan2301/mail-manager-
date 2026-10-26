@@ -5,12 +5,12 @@ import hashlib
 import logging
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import joinedload
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import AIReviewSetting, Classification, ConversationAIReview, Email, SecurityAuditEvent
+from app.models.entities import AIReviewSetting, Classification, ConversationAIReview, Email, EmailStatus, SecurityAuditEvent
 from app.services.gmail import GmailDeltaSync
 from app.services.graph import DelegatedGraphDeltaSync, GraphDeltaSync, delegated_authority_tenant
 from app.services.security_events import audit
@@ -97,10 +97,10 @@ async def review_new_or_changed_conversations() -> dict:
             return {"skipped": "AI reviews are not enabled", "reviewed": 0, "failed": 0}
         now = datetime.now(ZoneInfo(settings.app_timezone))
         cutoff = min(now.replace(day=1,hour=0,minute=0,second=0,microsecond=0),now-timedelta(days=7)).astimezone(timezone.utc)
-        incoming = list(db.scalars(select(Email).options(joinedload(Email.mailbox), joinedload(Email.employee)).where(Email.folder == "inbox", Email.classification == Classification.CUSTOMER, Email.assigned_employee_id.is_not(None), Email.received_time >= cutoff).order_by(Email.received_time, Email.id)))
+        incoming = list(db.scalars(select(Email).options(joinedload(Email.mailbox), joinedload(Email.employee), joinedload(Email.responder)).where(Email.folder == "inbox", Email.classification == Classification.CUSTOMER, or_(and_(Email.status==EmailStatus.PENDING,Email.assigned_employee_id.is_not(None)),and_(Email.status==EmailStatus.REPLIED,Email.responder_employee_id.is_not(None))), Email.received_time >= cutoff).order_by(Email.received_time, Email.id)))
         grouped: dict[tuple[int, str, int], list[Email]] = {}
         for email in incoming:
-            grouped.setdefault((email.mailbox_id, _conversation_key(email), email.assigned_employee_id), []).append(email)
+            grouped.setdefault((email.mailbox_id, _conversation_key(email), email.responder_employee_id if email.status==EmailStatus.REPLIED else email.assigned_employee_id), []).append(email)
         stored = {(row.mailbox_id, row.conversation_key, row.employee_id): row for row in db.scalars(select(ConversationAIReview))}
         # Review the newest customer conversations first. A single slow or
         # stale historical thread must not starve the current daily report.
@@ -108,7 +108,7 @@ async def review_new_or_changed_conversations() -> dict:
         for (mailbox_id, key, employee_id), messages_inbox in ordered_groups:
             db.refresh(consent)
             if not consent.enabled:return {"skipped":"AI reviews were disabled","reviewed":reviewed,"failed":failed}
-            employee = messages_inbox[-1].employee
+            employee = messages_inbox[-1].responder if messages_inbox[-1].status==EmailStatus.REPLIED else messages_inbox[-1].employee
             if not employee:
                 continue
             thread = _thread_rows(db, mailbox_id, key, messages_inbox)

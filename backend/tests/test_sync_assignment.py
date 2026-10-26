@@ -85,7 +85,8 @@ def test_cc_observers_do_not_owe_replies_and_actual_responder_gets_credit():
         db.add(reply);db.flush()
         sync.reconcile_replies(db,[y,a,ceo]);db.flush()
         assert copies[0].status==EmailStatus.REPLIED
-        assert copies[0].assigned_employee_id==a.id
+        assert copies[0].assigned_employee_id==y.id
+        assert copies[0].responder_employee_id==a.id
         assert copies[0].replied_at==reply.received_time
         assert reply.status==EmailStatus.OBSERVER_COPY
         performance={row["id"]:row for row in EmailRepository(db).employee_performance()}
@@ -94,8 +95,15 @@ def test_cc_observers_do_not_owe_replies_and_actual_responder_gets_credit():
         assert performance[ceo.id]["pending"]==performance[ceo.id]["replied"]==0
         # Reconciliation is safe on the next delta sync with no new messages.
         sync.reconcile_replies(db,[y,a,ceo]);db.flush()
-        assert copies[0].assigned_employee_id==a.id
+        assert copies[0].assigned_employee_id==y.id
+        assert copies[0].responder_employee_id==a.id
         assert EmailRepository(db).all_employee_reply_rate()["replied"]==1
+        copies[0].assigned_employee_id=ceo.id
+        copies[0].assignment_overridden=True
+        sync.reconcile_replies(db,[y,a,ceo]);db.flush()
+        assert copies[0].assigned_employee_id==ceo.id
+        assert copies[0].responder_employee_id==a.id
+        assert {row["id"]:row for row in EmailRepository(db).employee_performance()}[a.id]["replied"]==1
     engine.dispose()
 
 

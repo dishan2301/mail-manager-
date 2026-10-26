@@ -57,6 +57,8 @@ def report_db(monkeypatch):
 
 def mail(db, message_id, when=None, **values):
     values = {"mailbox_id": 1, "message_id": message_id, "conversation_id": message_id, "sender": "customer@example.com", "receiver": "one@indianinfotech.org", "subject": "Request", "received_time": when or Clock.now(timezone.utc), "folder": "inbox", "classification": Classification.CUSTOMER, "status": EmailStatus.PENDING, "assigned_employee_id": 1, **values}
+    if values["status"] == EmailStatus.REPLIED:
+        values.setdefault("responder_employee_id", values["assigned_employee_id"])
     row = Email(**values)
     db.add(row)
     db.commit()
@@ -462,6 +464,25 @@ def test_shared_to_mail_is_pending_for_both_but_only_responder_gets_credit(repor
     exported_rows={row["employee_id"]:row for row in csv.DictReader(StringIO(exported.content.decode("utf-8-sig")))}
     assert exported_rows["2"]["replied_by_other"]=="1"
     assert exported_rows["2"]["replied"]=="0"
+
+
+def test_reassigning_replied_mail_does_not_transfer_credit(report_db):
+    sessions, client = report_db
+    with sessions() as db:
+        answered = mail(db, "answered", status=EmailStatus.REPLIED, responder_employee_id=1,
+                        assigned_employee_id=1, replied_at=Clock.now(timezone.utc))
+        original_time = answered.replied_at
+        routes.assign_email(answered.id, request=SimpleNamespace(state=SimpleNamespace()),
+                            employee_id=2, principal={"user_id": 1}, db=db)
+        db.refresh(answered)
+        assert answered.assignment_overridden is True
+        assert answered.responder_employee_id == 1
+        assert answered.replied_at == original_time
+    performance = {row["id"]: row for row in client.get("/api/employees/performance").json()}
+    assert performance[1]["replied"] == 1
+    assert performance[2]["replied"] == 0
+    rows = {row["employee_id"]: row for row in client.get("/api/reports/monthly?dimension=employee").json()["rows"]}
+    assert rows[1]["replied"] == 1 and rows[2]["replied_by_other"] == 1
 
 
 def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db):

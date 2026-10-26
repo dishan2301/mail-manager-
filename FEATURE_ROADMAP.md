@@ -19,6 +19,7 @@ There is no fixed calendar promise. Advance when each phase's acceptance checks 
 - F1: each active mailbox is assessed independently, with a dashboard/Mailboxes warning after `SYNC_STALE_AFTER_SECONDS` (default 900) and one admin email per stale period when delivery works. Test this with a controlled mailbox in the test deployment before release.
 - F2: observer and direct duplicate customer inbox copies now have separate statuses in sync, dashboard, pending-mail filters, and reports. A reversible `0017` migration was rehearsed on a copy of the local `0014` snapshot; [F2_MIGRATION.md](F2_MIGRATION.md) records counts and rollback. Reply credit and report tests pass. Test deployment validation and review remain before release.
 - Remaining Phase 1 release gate: validate F5 with a controlled AI account and F1/F2 with a controlled mailbox in the test deployment, compare counts, and review before merging to `main`.
+- Phase 2 F6: responder identity is stored separately from assignment. Manual reassignment preserves credit and `replied_at`; a reversible `0019` backfill matched all 44 historical replied rows and per-employee credit counts in an isolated local rehearsal. See [F6_MIGRATION.md](F6_MIGRATION.md). Test deployment validation remains before release.
 
 ## Phase 0 — Baseline and metric definitions
 
