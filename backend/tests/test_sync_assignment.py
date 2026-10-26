@@ -79,7 +79,7 @@ def test_cc_observers_do_not_owe_replies_and_actual_responder_gets_credit():
         sync.reconcile_replies(db,[y,a,ceo]);db.flush()
         assert copies[0].status==EmailStatus.PENDING
         assert copies[0].assigned_employee_id==y.id
-        assert all(row.status==EmailStatus.IGNORED and row.assigned_employee_id is None for row in copies[1:])
+        assert all(row.status==EmailStatus.OBSERVER_COPY and row.assigned_employee_id is None for row in copies[1:])
         # A's reply can be observed in Y's inbox, even without access to A's Sent folder.
         reply=message(boxes[0],"reply",a.email,start+timedelta(hours=1),target="<original>")
         db.add(reply);db.flush()
@@ -87,6 +87,7 @@ def test_cc_observers_do_not_owe_replies_and_actual_responder_gets_credit():
         assert copies[0].status==EmailStatus.REPLIED
         assert copies[0].assigned_employee_id==a.id
         assert copies[0].replied_at==reply.received_time
+        assert reply.status==EmailStatus.OBSERVER_COPY
         performance={row["id"]:row for row in EmailRepository(db).employee_performance()}
         assert performance[a.id]["replied"]==1
         assert performance[y.id]["pending"]==performance[y.id]["replied"]==0
@@ -118,6 +119,41 @@ def test_ceo_monitoring_copy_assigns_to_employee_without_employee_mailbox():
         assert reports[a.id]["pending"]==1
         assert reports[ceo.id]["pending"]==0
         assert db.scalars(select(Mailbox)).all()==[monitor]
+    engine.dispose()
+
+
+def test_direct_duplicate_copy_keeps_one_reply_obligation():
+    from datetime import datetime, timezone
+    from app.models.entities import Classification, EmailStatus
+    from app.repositories.email import EmailRepository
+    engine=create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as db:
+        person=Employee(name="A",email="a@indianinfotech.org",active=True)
+        boxes=[Mailbox(address=person.email,display_name="A"),Mailbox(address="b@indianinfotech.org",display_name="B")]
+        db.add_all([person,*boxes]);db.flush()
+        copies=[Email(mailbox_id=box.id,message_id="copy",internet_message_id="<same>",sender="customer@example.com",receiver="a@indianinfotech.org, b@indianinfotech.org",subject="Request",received_time=datetime(2026,10,26,tzinfo=timezone.utc),folder="inbox",classification=Classification.CUSTOMER,status=EmailStatus.IGNORED) for box in boxes]
+        db.add_all(copies);db.flush()
+        sync.reconcile_replies(db,[person]);db.flush()
+        assert [row.status for row in copies]==[EmailStatus.PENDING,EmailStatus.DUPLICATE_COPY]
+        assert EmailRepository(db).all_employee_reply_rate()["total_incoming"]==1
+    engine.dispose()
+
+
+def test_manually_ignored_customer_remains_ignored_during_reconciliation():
+    from datetime import datetime, timezone
+    from app.models.entities import Classification, EmailStatus
+    engine=create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as db:
+        employee=Employee(name="A",email="a@indianinfotech.org",active=True)
+        mailbox=Mailbox(address=employee.email,display_name="A")
+        db.add_all([employee,mailbox]);db.flush()
+        row=Email(mailbox_id=mailbox.id,message_id="ignored",sender="customer@example.com",receiver=employee.email,subject="Request",received_time=datetime(2026,10,26,tzinfo=timezone.utc),folder="inbox",classification=Classification.CUSTOMER,status=EmailStatus.IGNORED,manually_ignored=True)
+        db.add(row);db.flush()
+        sync.reconcile_replies(db,[employee]);db.flush()
+        assert row.status==EmailStatus.IGNORED and row.assigned_employee_id is None
+        assert not row.recipients
     engine.dispose()
 
 

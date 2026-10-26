@@ -78,6 +78,7 @@ async def sync_all_mailboxes():
                     folder=item.get("_folder","unknown");sent_at=datetime.fromisoformat(item["sentDateTime"].replace("Z","+00:00")) if item.get("sentDateTime") else None
                     values={"conversation_id":_text(item.get("conversationId"),512) or None,"internet_message_id":_text(item.get("internetMessageId"),998) or None,"in_reply_to":_text(headers.get("in-reply-to"),998) or None,"references":_text(headers.get("references"),8000) or None,"thread_index":_text(item.get("conversationIndex"),8000) or None,"sender":sender,"receiver":_recipients(item,mailbox.address),"subject":_text(item.get("subject") or "(no subject)",4000),"received_time":received,"sent_time":sent_at,"folder":_text(folder,80),"categories":[_text(value,200) for value in item.get("categories",[])[:100]],"classification":classification,"status":EmailStatus.PENDING if folder=="inbox" and classification.value=="Customer" else EmailStatus.IGNORED,"pending_hours":pending,"sla_tier":tier}
                     if existing:
+                        if existing.manually_ignored:values["status"]=EmailStatus.IGNORED
                         for key,value in values.items():setattr(existing,key,value)
                         if folder=="inbox" and existing.assigned_employee_id is None:
                             existing.assigned_employee_id=_assignee(values["receiver"],mailbox.address,employees)
@@ -150,7 +151,9 @@ def reconcile_replies(db,employees):
             response_ids.add((response.internet_message_id or "").strip().casefold() or (response.mailbox_id,response.message_id))
         for row in copies:
             for recipient in recipients_by_email.get(row.id,[]):db.delete(recipient)
-            row.status=EmailStatus.IGNORED;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+            row.status=(EmailStatus.IGNORED if row.manually_ignored else EmailStatus.DUPLICATE_COPY if row is not primary and mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")} else EmailStatus.OBSERVER_COPY if row.classification.value=="Customer" else EmailStatus.IGNORED)
+            row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+        if primary.manually_ignored:continue
         if _assignee(primary.receiver,"",employees) is None and match is None:continue
         to_ids={employees_by_address[address.strip().casefold()] for address in primary.receiver.replace(";",",").split(",") if address.strip().casefold() in employees_by_address}
         for employee_id in to_ids:db.add(EmailRecipient(email_id=primary.id,employee_id=employee_id))
@@ -166,7 +169,7 @@ def reconcile_replies(db,employees):
         identity=(row.internet_message_id or "").strip().casefold() or (row.mailbox_id,row.message_id)
         if row.folder=="inbox" and identity in response_ids:
             for recipient in list(db.scalars(select(EmailRecipient).where(EmailRecipient.email_id==row.id))):db.delete(recipient)
-            row.status=EmailStatus.IGNORED;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+            row.status=EmailStatus.IGNORED if row.manually_ignored else EmailStatus.OBSERVER_COPY;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
 
 
 def _utc(value):

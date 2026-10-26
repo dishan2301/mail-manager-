@@ -185,6 +185,20 @@ def test_totals_employee_identity_scoping_and_exports(report_db, monkeypatch):
     assert client.get(endpoint + "/employees/1/ai-review").json()["conversation_count"] == 0
 
 
+def test_copy_statuses_are_separate_from_ignored_in_dashboard_and_reports(report_db):
+    sessions, client = report_db
+    with sessions() as db:
+        mail(db, "observer", status=EmailStatus.OBSERVER_COPY, assigned_employee_id=None)
+        mail(db, "duplicate", status=EmailStatus.DUPLICATE_COPY, assigned_employee_id=None)
+        mail(db, "ignored", status=EmailStatus.IGNORED)
+    dashboard = client.get("/api/dashboard/kpis").json()
+    assert (dashboard["observer_copies"], dashboard["duplicate_copies"], dashboard["ignored_emails"]) == (1, 1, 1)
+    row = client.get("/api/reports/monthly?dimension=customer").json()["rows"][0]
+    assert (row["observer_copy"], row["duplicate_copy"], row["ignored"]) == (1, 1, 1)
+    exported = list(csv.DictReader(StringIO(client.get("/api/reports/monthly/export?dimension=customer&format=csv").content.decode("utf-8-sig"))))[0]
+    assert (exported["observer_copy"], exported["duplicate_copy"], exported["ignored"]) == ("1", "1", "1")
+
+
 def test_daily_run_covers_all_changed_conversations_and_paginates(report_db, monkeypatch):
     sessions, client = report_db
     with sessions() as db:

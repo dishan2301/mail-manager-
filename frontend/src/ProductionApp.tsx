@@ -183,6 +183,8 @@ function replyStatusLabel(value: unknown) {
   if (status === "pending") return "Not Replied";
   if (status === "replied") return "Replied";
   if (status === "ignored") return "Ignored";
+  if (status === "observer_copy") return "Observer copy";
+  if (status === "duplicate_copy") return "Duplicate copy";
   return String(value ?? "");
 }
 function formatMailboxDateTime(value: unknown, timeZone?: string) {
@@ -693,6 +695,8 @@ function MailKanban({ rows, onSelect }: { rows: any[]; onSelect: (row: any) => v
     ["pending", "Awaiting reply"],
     ["replied", "Replied"],
     ["ignored", "Ignored"],
+    ["observer_copy", "Observer copy"],
+    ["duplicate_copy", "Duplicate copy"],
   ] as const;
   return <Box className="mail-kanban">{columns.map(([status, label]) => {
     const items = rows.filter((row) => String(row.status).toLowerCase() === status);
@@ -1571,7 +1575,7 @@ function ReferenceDashboard({
           <Box className="reference-card-head"><Box><span>ALL TIME · ALL MAILBOXES</span><b>Overall reply rate</b></Box></Box>
           <Box className="reference-gauge" style={{ "--progress": `${(allInboxReplyRate / 100) * 180}deg` } as React.CSSProperties}><Box><strong>{allInboxReplyRate}%</strong><small>reply rate</small></Box></Box>
           <Box className="reference-legend"><span><i />{allInboxReplied} replied</span><span><i />{allInboxTotal} received</span></Box>
-          <small className="reply-rate-caption">{allInboxReplied} replied out of {allInboxTotal} incoming emails across accessible mailboxes; ignored mail is excluded.</small>
+          <small className="reply-rate-caption">{allInboxReplied} replied out of {allInboxTotal} customer messages requiring a reply across accessible mailboxes; ignored, observer, and duplicate copies are excluded.</small>
         </Card>
         <Card className="reference-sync">
           <Box className="sync-rings" aria-hidden="true" />
@@ -1583,7 +1587,7 @@ function ReferenceDashboard({
         <Card className="reference-mail-tracker">
           <Box className="reference-card-head"><Box><span>MAIL TRACKER</span><b>Ownership & response flow</b></Box><Button size="small" onClick={() => onNavigate("Employee Performance")}>Details</Button></Box>
           <Box className="tracker-statuses">
-            {[{ label: "Incoming", value: Number(data.today_emails || 0), tone: "in" }, { label: "Awaiting reply", value: pending, tone: "pending" }, { label: "Replied", value: resolved, tone: "resolved" }, { label: "Ignored", value: Number(data.ignored_emails || 0), tone: "ignored" }].map((item) => <Box className="tracker-status" title={`${item.label}: ${item.value}`} key={item.label}><i className={item.tone} /><strong>{item.value}</strong><small>{item.label}</small></Box>)}
+            {[{ label: "Incoming", value: Number(data.today_emails || 0), tone: "in" }, { label: "Awaiting reply", value: pending, tone: "pending" }, { label: "Replied", value: resolved, tone: "resolved" }, { label: "Ignored", value: Number(data.ignored_emails || 0), tone: "ignored" }, { label: "Observer copies", value: Number(data.observer_copies || 0), tone: "ignored" }, { label: "Duplicate copies", value: Number(data.duplicate_copies || 0), tone: "ignored" }].map((item) => <Box className="tracker-status" title={`${item.label}: ${item.value}`} key={item.label}><i className={item.tone} /><strong>{item.value}</strong><small>{item.label}</small></Box>)}
           </Box>
           <Typography className="tracker-caption">{assignedTotal} tracked messages connected to employees</Typography>
           <Box className="tracker-people">{topEmployees.length ? topEmployees.map((row, index) => <Box key={row.employee || row.name || index} title={`${row.employee || row.name}: ${Number(row.pending || 0)} pending, ${Number(row.resolved || row.replied || 0)} resolved`}><span>{String(row.employee || row.name || "Employee").slice(0, 18)}</span><LinearProgress variant="determinate" value={Math.min(100, (Number(row.total || row.emails || 0) / Math.max(1, assignedTotal)) * 100)} /><b>{Number(row.total || row.emails || 0)}</b></Box>) : <Typography variant="body2" color="text.secondary">Employee ownership appears after performance data is available.</Typography>}</Box>
@@ -3295,6 +3299,8 @@ export default function ProductionApp() {
                     <MenuItem value="overdue">{text("filter.overdue")}</MenuItem>
                     <MenuItem value="replied">{text("filter.replied")}</MenuItem>
                     <MenuItem value="ignored">Ignored</MenuItem>
+                    <MenuItem value="observer_copy">Observer copy</MenuItem>
+                    <MenuItem value="duplicate_copy">Duplicate copy</MenuItem>
                   </TextField>
                   <TextField
                     select
@@ -3430,7 +3436,7 @@ export default function ProductionApp() {
                 </Box>
               )}
               {section === "Reports" && <Alert severity="info" sx={{ mb: 2 }}>
-                {reportPeriod === "daily" ? "Today" : reportPeriod === "weekly" ? "Last 7 days" : "This month"} · Customer emails received since {formatMailboxDateTime(data?.period_start)}.
+                {reportPeriod === "daily" ? "Today" : reportPeriod === "weekly" ? "Last 7 days" : "This month"} · Inbox copies received since {formatMailboxDateTime(data?.period_start)}. Ignored, observer, and duplicate copies are separate report columns; reply rate uses replied and pending obligations.
                 {rows.every((row) => Number(row.total_received) === 0) && <> No incoming mail was received in this period.{data?.latest_received_at && <> Latest received mail: {formatMailboxDateTime(data.latest_received_at)}.</>} Choose a longer period to see earlier mail.</>}
               </Alert>}
               {section === "Employee Performance" && (
@@ -3931,7 +3937,7 @@ export default function ProductionApp() {
                     </Box>
                     <Stack direction="row" spacing={1} alignItems="center">
                       {selectedEmail.status === "replied" && <Chip size="small" color="success" label="Replied" />}
-                      {selectedEmail.status === "ignored" && <Chip size="small" color="default" label="Ignored" />}
+                      {["ignored", "observer_copy", "duplicate_copy"].includes(selectedEmail.status) && <Chip size="small" color="default" label={replyStatusLabel(selectedEmail.status)} />}
                       {selectedEmail.status === "ignored" ? (
                         <Button size="small" onClick={() => updateEmailStatus("pending")}>Restore</Button>
                       ) : (

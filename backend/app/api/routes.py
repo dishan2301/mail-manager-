@@ -381,8 +381,10 @@ def update_email_status(email_id:int,payload:dict,request:Request,principal:dict
     row=db.get(Email,email_id)
     if not row: raise HTTPException(404,"Email not found")
     try: status=EmailStatus(str(payload.get("status", "")).lower())
-    except ValueError: raise HTTPException(422,"Status must be pending, replied, or ignored")
+    except ValueError: raise HTTPException(422,"Invalid email status")
+    if status in {EmailStatus.OBSERVER_COPY,EmailStatus.DUPLICATE_COPY}:raise HTTPException(422,"Copy statuses are set by synchronization")
     row.status=status
+    row.manually_ignored=status==EmailStatus.IGNORED
     if status != EmailStatus.REPLIED: row.replied_at=None
     audit(db,request,"email.status.update","success",principal["user_id"],"email",email_id,{"status":status.value})
     db.commit()
@@ -536,11 +538,11 @@ def dashboard_growth(principal:dict=viewer,db:Session=Depends(get_db)):
     now=datetime.now(timezone.utc);start=(now-timedelta(days=13)).replace(hour=0,minute=0,second=0,microsecond=0)
     scope=mailbox_scope(db,principal);filters=[Email.folder=="inbox",Email.received_time>=start]
     if scope is not None: filters.append(Email.mailbox_id.in_(scope))
-    buckets={(start+timedelta(days=i)).date().isoformat():{"date":(start+timedelta(days=i)).date().isoformat(),"incoming":0,"replied":0,"pending":0,"ignored":0} for i in range(14)}
+    buckets={(start+timedelta(days=i)).date().isoformat():{"date":(start+timedelta(days=i)).date().isoformat(),"incoming":0,"replied":0,"pending":0,"ignored":0,"observer_copy":0,"duplicate_copy":0} for i in range(14)}
     for row in db.scalars(select(Email).where(*filters)):
         bucket=buckets.get(row.received_time.astimezone(timezone.utc).date().isoformat())
         if bucket:
-            bucket["incoming"]+=1;bucket[row.status.value if row.status.value in {"replied","pending","ignored"} else "pending"]+=1
+            bucket["incoming"]+=1;bucket[row.status.value]+=1
     return list(buckets.values())
 @router.get("/dashboard/insights",dependencies=[viewer])
 def dashboard_insights(principal:dict=viewer,db:Session=Depends(get_db)):
@@ -605,7 +607,7 @@ def report(period:str,dimension:str=Query(...,pattern="^(department|employee|cus
         if employee_id is not None:employee_scope.append(Employee.id==employee_id)
         for employee in db.scalars(select(Employee).where(*employee_scope)):
             group_id=("employee",employee.id) if dimension=="employee" else employee.department or "General"
-            grouped.setdefault(group_id,{"dimension":employee.name if dimension=="employee" else employee.department or "General","employee_id":employee.id,"department":employee.department or "General","total":0,"pending":0,"resolved":0,"replied_by_other":0,"ignored":0,"critical":0,"reply_hours":0.0})
+            grouped.setdefault(group_id,{"dimension":employee.name if dimension=="employee" else employee.department or "General","employee_id":employee.id,"department":employee.department or "General","total":0,"pending":0,"resolved":0,"replied_by_other":0,"ignored":0,"observer_copy":0,"duplicate_copy":0,"critical":0,"reply_hours":0.0})
     for e in rows:
         participants={recipient.employee_id:recipient.employee for recipient in e.recipients}
         if e.employee:participants[e.employee.id]=e.employee
@@ -622,13 +624,13 @@ def report(period:str,dimension:str=Query(...,pattern="^(department|employee|cus
         if not participants and dimension in {"employee","department"}:entries={key(e):[None,True]}
         for group_id,(person,owns_credit) in entries.items():
             name=(person.name if dimension=="employee" else person.department or "General") if person else key(e)
-            bucket=grouped.setdefault(group_id,{"dimension":name,"employee_id":person.id if dimension=="employee" and person else None,"department":person.department if dimension=="employee" and person else None,"total":0,"pending":0,"resolved":0,"replied_by_other":0,"ignored":0,"critical":0,"reply_hours":0.0})
+            bucket=grouped.setdefault(group_id,{"dimension":name,"employee_id":person.id if dimension=="employee" and person else None,"department":person.department if dimension=="employee" and person else None,"total":0,"pending":0,"resolved":0,"replied_by_other":0,"ignored":0,"observer_copy":0,"duplicate_copy":0,"critical":0,"reply_hours":0.0})
             credited=e.status==EmailStatus.REPLIED and owns_credit
-            bucket["total"]+=1;bucket["pending"]+=int(e.status==EmailStatus.PENDING);bucket["resolved"]+=int(credited);bucket["replied_by_other"]+=int(e.status==EmailStatus.REPLIED and not owns_credit);bucket["ignored"]+=int(e.status==EmailStatus.IGNORED);bucket["critical"]+=int(e.status==EmailStatus.PENDING and e.sla_tier==SLATier.CRITICAL)
+            bucket["total"]+=1;bucket["pending"]+=int(e.status==EmailStatus.PENDING);bucket["resolved"]+=int(credited);bucket["replied_by_other"]+=int(e.status==EmailStatus.REPLIED and not owns_credit);bucket["ignored"]+=int(e.status==EmailStatus.IGNORED);bucket["observer_copy"]+=int(e.status==EmailStatus.OBSERVER_COPY);bucket["duplicate_copy"]+=int(e.status==EmailStatus.DUPLICATE_COPY);bucket["critical"]+=int(e.status==EmailStatus.PENDING and e.sla_tier==SLATier.CRITICAL)
             if credited:bucket["reply_hours"]+=e.pending_hours
     ordered=sorted(grouped.values(),key=lambda row:((row.get("department") or "").casefold(),row["dimension"].casefold()))
     latest_received=db.scalar(select(func.max(Email.received_time)).where(Email.folder=="inbox",*scope))
-    return {"period":period,"dimension":dimension,"period_start":cutoff,"latest_received_at":_utc_timestamp(latest_received),"rows":[{"dimension":x["dimension"],**({"employee_id":x["employee_id"],"department":x["department"]} if dimension=="employee" else {}),"total_received":x["total"],"replied":x["resolved"],"not_replied":x["pending"],"replied_by_other":x["replied_by_other"],"ignored":x["ignored"],"critical":x["critical"],"reply_rate":round(x["resolved"]*100/(x["resolved"]+x["pending"]+x["replied_by_other"]),1) if x["resolved"]+x["pending"]+x["replied_by_other"] else 0,"average_reply_hours":x["reply_hours"]/x["resolved"] if x["resolved"] else 0} for x in ordered]}
+    return {"period":period,"dimension":dimension,"period_start":cutoff,"latest_received_at":_utc_timestamp(latest_received),"rows":[{"dimension":x["dimension"],**({"employee_id":x["employee_id"],"department":x["department"]} if dimension=="employee" else {}),"total_received":x["total"],"replied":x["resolved"],"not_replied":x["pending"],"replied_by_other":x["replied_by_other"],"ignored":x["ignored"],"observer_copy":x["observer_copy"],"duplicate_copy":x["duplicate_copy"],"critical":x["critical"],"reply_rate":round(x["resolved"]*100/(x["resolved"]+x["pending"]+x["replied_by_other"]),1) if x["resolved"]+x["pending"]+x["replied_by_other"] else 0,"average_reply_hours":x["reply_hours"]/x["resolved"] if x["resolved"] else 0} for x in ordered]}
 
 @router.get("/reports/{period}/employees/{employee_id}/mail",dependencies=[viewer])
 def employee_mail_report(period:str,employee_id:int,principal:dict=viewer,db:Session=Depends(get_db)):
