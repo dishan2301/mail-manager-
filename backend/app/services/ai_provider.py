@@ -1,3 +1,5 @@
+import httpx
+
 from app.core.config import Settings, get_settings
 from app.models.entities import AIProviderSetting
 from app.services.secrets import SecretCipher
@@ -55,6 +57,34 @@ def active_ai_settings(db, settings: Settings | None = None) -> Settings:
     return settings.model_copy(update={"ai_api_key": _stored_key(row, row.provider, settings),
                                "ai_api_base_url": BASE_URLS[row.provider], "ai_model": row.model,
                                "ai_fallback_model": ""})
+
+
+async def test_ai_connection(settings: Settings) -> dict:
+    """Probe the saved model with synthetic text; never send customer content."""
+    if not settings.ai_api_key:
+        return {"ok": False, "message": "Add an API key before testing the AI connection."}
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            response = await client.post(
+                f"{settings.ai_api_base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.ai_api_key}"},
+                json={"model": settings.ai_model, "max_tokens": 8,
+                      "messages": [{"role": "user", "content": "Reply with OK."}]},
+            )
+    except httpx.RequestError:
+        return {"ok": False, "message": "Could not reach the AI provider. Check the connection and try again."}
+    if response.status_code >= 400:
+        hint = {401: "Check the saved API key.", 402: "Check provider credits.",
+                404: "The saved model may be unavailable for this key; choose another model.",
+                429: "Provider quota or rate limit reached; try again later."}.get(response.status_code, "Check provider settings.")
+        return {"ok": False, "status_code": response.status_code,
+                "message": f"AI provider returned HTTP {response.status_code}. {hint}"}
+    try:
+        content = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        content = None
+    valid = isinstance(content, str) and bool(content.strip())
+    return {"ok": valid, "message": "AI connection works." if valid else "AI provider returned no usable response."}
 
 def save_ai_settings(db, provider: str, model: str, api_key: str | None, settings: Settings | None = None) -> dict:
     if provider not in MODELS or model not in MODELS[provider]:

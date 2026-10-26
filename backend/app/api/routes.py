@@ -30,11 +30,12 @@ from app.services.secrets import get_mailbox_token,set_mailbox_token,set_mailbox
 from app.services.oauth_transactions import _digest,clear_oauth_cookie,consume_transaction,new_oauth_values,pkce_pair,save_transaction
 from app.services.authorization import mailbox_scope,require_email_scope
 from app.services.writing_assistant import WritingAssistantError,suggest_reply
-from app.services.ai_provider import active_ai_settings,provider_status,save_ai_settings
+from app.services.ai_provider import active_ai_settings,provider_status,save_ai_settings,test_ai_connection
 from app.services.conversation_reviews import REVIEW_VERSION,_review_activity,_thread_rows
 from app.services.notifications import report_mailbox_available
 from app.services.sla import Calendar,elapsed_hours,tier_for
 from app.services.scheduler import apply_sync_settings,build_scheduler
+from app.services.sync_health import mailbox_freshness
 from io import BytesIO,StringIO
 from openpyxl import Workbook
 from reportlab.lib.pagesizes import A4
@@ -193,9 +194,10 @@ def dashboard_kpis(principal:dict=viewer,db:Session=Depends(get_db)):return Dash
 @router.get("/system/readiness",dependencies=[viewer])
 def system_readiness(principal:dict=viewer,db:Session=Depends(get_db)):
     settings=get_settings();allowed=mailbox_scope(db,principal);scope=[] if allowed is None else [Mailbox.id.in_(allowed)];active=list(db.scalars(select(Mailbox).where(Mailbox.status!=MailboxStatus.PAUSED,*scope)));configured_count=len(active);healthy=db.scalar(select(func.count()).select_from(Mailbox).where(Mailbox.status==MailboxStatus.ACTIVE,*scope)) or 0;errors=db.scalar(select(func.count()).select_from(Mailbox).where(Mailbox.status==MailboxStatus.ERROR,*scope)) or 0;paused=db.scalar(select(func.count()).select_from(Mailbox).where(Mailbox.status==MailboxStatus.PAUSED,*scope)) or 0;last_sync=db.scalar(select(func.max(Mailbox.last_synced_at)).where(*scope));warnings=sum(1 for row in active if row.last_sync_error and row.last_sync_error.startswith("Temporary sync issue:"))
+    stale_after=max(60,getattr(settings,"sync_stale_after_seconds",900));mailbox_health=[mailbox_freshness(row,stale_after) for row in active];stale=sum(row["stale"] for row in mailbox_health)
     graph_configured=any(row.provider=="microsoft" and bool((configured:=mailbox_graph_settings(row,settings)).azure_client_id and (row.connected or configured.azure_tenant_id and (configured.azure_client_secret or configured.azure_client_certificate_path))) for row in active);gmail_configured=bool(settings.google_client_id and settings.google_client_secret)
     integration_configured=bool(active) and all((row.connected and gmail_configured) if row.provider=="gmail" else bool((configured:=mailbox_graph_settings(row,settings)).azure_client_id and (row.connected or configured.azure_tenant_id and (configured.azure_client_secret or configured.azure_client_certificate_path))) for row in active)
-    return {"operational":bool(integration_configured and configured_count and not errors and last_sync),"integration_configured":integration_configured,"graph_configured":graph_configured,"gmail_configured":gmail_configured,"smtp_configured":bool(settings.smtp_host and settings.smtp_username and settings.smtp_password) or report_mailbox_available(),"configured_mailboxes":configured_count,"healthy_mailboxes":healthy,"error_mailboxes":errors,"warning_mailboxes":warnings,"paused_mailboxes":paused,"last_successful_sync":last_sync}
+    return {"operational":bool(integration_configured and configured_count and not errors and not stale and all(not row["never_synced"] for row in mailbox_health)),"integration_configured":integration_configured,"graph_configured":graph_configured,"gmail_configured":gmail_configured,"smtp_configured":bool(settings.smtp_host and settings.smtp_username and settings.smtp_password) or report_mailbox_available(),"configured_mailboxes":configured_count,"healthy_mailboxes":healthy,"error_mailboxes":errors,"warning_mailboxes":warnings,"paused_mailboxes":paused,"stale_mailboxes":stale,"stale_after_seconds":stale_after,"mailbox_health":mailbox_health,"last_successful_sync":last_sync}
 @router.get("/system/graph-setup",dependencies=[admin])
 def graph_setup(mailbox:str|None=None,db:Session=Depends(get_db)):
     row=db.scalar(select(Mailbox).where(Mailbox.address==mailbox)) if mailbox else None
@@ -660,6 +662,11 @@ def export_report(period:str,request:Request,dimension:str=Query(...,pattern="^(
 @router.get("/settings/ai-provider",dependencies=[admin])
 def get_ai_provider(db:Session=Depends(get_db)):
     return provider_status(db)
+@router.post("/settings/ai-provider/test",dependencies=[admin])
+async def test_saved_ai_provider(db:Session=Depends(get_db)):
+    settings=active_ai_settings(db,get_settings())
+    result=await test_ai_connection(settings)
+    return {**result,"model":settings.ai_model,"tested_at":datetime.now(timezone.utc)}
 @router.patch("/settings/ai-provider",dependencies=[admin])
 def update_ai_provider(payload:dict,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     provider=payload.get("provider");model=payload.get("model");api_key=payload.get("api_key")

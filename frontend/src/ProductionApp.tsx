@@ -710,9 +710,17 @@ type Readiness = {
   healthy_mailboxes: number;
   error_mailboxes: number;
   warning_mailboxes: number;
+  stale_mailboxes: number;
+  stale_after_seconds: number;
+  mailbox_health: {id:number;address:string;last_successful_sync:string|null;stale:boolean;never_synced:boolean;sync_error:boolean}[];
   paused_mailboxes: number;
   last_successful_sync: string | null;
 };
+function SyncFreshnessAlert({ readiness }: { readiness: Readiness | null }) {
+  const affected = readiness?.mailbox_health?.filter((row) => row.stale || row.never_synced) || [];
+  if (!affected.length) return null;
+  return <Alert severity="warning" sx={{ mb: 2 }}>Mailbox data may be incomplete: {affected.map((row) => `${row.address} (${row.never_synced ? "never synced" : `last successful sync ${new Date(row.last_successful_sync!).toLocaleString()}`})`).join("; ")}. Please check Mailboxes and run Sync.</Alert>;
+}
 type GraphSetup = {
   graph_configured: boolean;
   missing: string[];
@@ -1137,6 +1145,8 @@ function ProductionDashboard({
               label: format("dashboard.mailbox_error", { count: readiness.error_mailboxes }),
               color: "error" as const,
             }
+          : readiness.stale_mailboxes > 0
+            ? { message: "Mailbox sync is stale; dashboard counts may be incomplete", label: `${readiness.stale_mailboxes} stale mailbox${readiness.stale_mailboxes === 1 ? "" : "es"}`, color: "warning" as const }
           : readiness.warning_mailboxes > 0
             ? {
                 message: "Mailbox sync temporarily unavailable - last good dashboard data still shown",
@@ -1208,6 +1218,7 @@ function ProductionDashboard({
   const completed = activation.filter((item) => item.complete).length;
   return (
     <Box className="dashboard-stage" aria-label={text("dashboard.live_aria")}>
+      <SyncFreshnessAlert readiness={readiness} />
       <Box
         className={`executive-strip readiness-${integration.color}`}
         data-tour="readiness"
@@ -1483,6 +1494,8 @@ function ReferenceDashboard({
         ? { message: text("dashboard.integration.mailbox_missing.message"), label: text("dashboard.integration.mailbox_missing.label"), color: "warning" as const }
         : readiness.error_mailboxes > 0
           ? { message: text("dashboard.integration.sync_failed.message"), label: format("dashboard.mailbox_error", { count: readiness.error_mailboxes }), color: "error" as const }
+          : readiness.stale_mailboxes > 0
+            ? { message: "Mailbox sync is stale; dashboard counts may be incomplete", label: `${readiness.stale_mailboxes} stale mailbox${readiness.stale_mailboxes === 1 ? "" : "es"}`, color: "warning" as const }
           : readiness.warning_mailboxes > 0
             ? { message: "Mailbox sync temporarily unavailable - last good dashboard data still shown", label: `${readiness.warning_mailboxes} mailbox warning`, color: "warning" as const }
           : !readiness.last_successful_sync
@@ -1521,6 +1534,7 @@ function ReferenceDashboard({
   const allInboxReplyRate = allInboxTotal ? Math.round((allInboxReplied / allInboxTotal) * 100) : 0;
   return (
     <Box className="reference-dashboard" aria-label={text("dashboard.live_aria")}>
+      <SyncFreshnessAlert readiness={readiness} />
       <Box className={`reference-posture posture-${integration.color}`} data-tour="readiness">
         <Box><span>{text("dashboard.live_posture")}</span><b>{integration.message}</b></Box>
         <Chip color={integration.color} label={integration.label} />
@@ -2099,6 +2113,8 @@ export default function ProductionApp() {
     [aiConfig, setAiConfig] = useState<{provider:string;model:string;configured:Record<string,boolean>;models:Record<string,Record<string,string>>}|null>(null),
     [aiKey, setAiKey] = useState(""),
     [savingAiConfig, setSavingAiConfig] = useState(false),
+    [testingAiConfig, setTestingAiConfig] = useState(false),
+    [aiTestResult, setAiTestResult] = useState<{ok:boolean;message:string;model:string;tested_at:string}|null>(null),
     [reportPeriod, setReportPeriod] = useState("daily"),
     [reportDimension, setReportDimension] = useState("department"),
     [performanceSort, setPerformanceSort] = useState("employee"),
@@ -2907,9 +2923,17 @@ export default function ProductionApp() {
       const saved = await api("/settings/ai-provider", token, { method: "PATCH", body: JSON.stringify({ provider: aiConfig.provider, model: aiConfig.model, api_key: aiKey || null }) });
       setAiConfig(saved);
       setAiKey("");
+      setAiTestResult(null);
       setNotice(saved.reviews_queued ? `AI provider and model saved. ${saved.reviews_queued} failed review${saved.reviews_queued === 1 ? "" : "s"} queued for retry.` : "AI provider and model saved. New AI requests use this selection.");
     } catch (e) { setError(e instanceof Error ? e.message : "AI settings could not be saved"); }
     finally { setSavingAiConfig(false); }
+  };
+  const testAiConfig = async () => {
+    setTestingAiConfig(true);
+    setAiTestResult(null);
+    try { setAiTestResult(await api("/settings/ai-provider/test", token, { method: "POST" })); }
+    catch (e) { setAiTestResult({ ok:false, message:e instanceof Error ? e.message : "AI connection test failed", model:aiConfig?.model || "", tested_at:new Date().toISOString() }); }
+    finally { setTestingAiConfig(false); }
   };
   const runSync = async () => {
     setSyncing(true);
@@ -3500,10 +3524,14 @@ export default function ProductionApp() {
                   </TextField>
                   <TextField label={`${aiConfig.provider === "openrouter" ? "OpenRouter" : aiConfig.provider === "nvidia" ? "NVIDIA" : "Gemini"} API key`} type="password" autoComplete="new-password" value={aiKey} onChange={(e) => setAiKey(e.target.value)} helperText={aiConfig.configured[aiConfig.provider] ? "A key is saved. Leave blank to keep it." : "Add a key before saving this provider."} />
                   <Button variant="contained" disabled={savingAiConfig || (!aiConfig.configured[aiConfig.provider] && !aiKey.trim())} onClick={saveAiConfig}>{savingAiConfig ? "Saving…" : "Save AI settings"}</Button>
+                  <Button variant="outlined" disabled={testingAiConfig || savingAiConfig} onClick={testAiConfig}>{testingAiConfig ? "Testing…" : "Test saved connection"}</Button>
+                  <Typography variant="caption">Save your provider and model first. This test sends only synthetic text and may use a few provider tokens.</Typography>
+                  {aiTestResult && <Alert severity={aiTestResult.ok ? "success" : "error"}>{aiTestResult.message} Model: {aiTestResult.model}. Tested {new Date(aiTestResult.tested_at).toLocaleString()}.</Alert>}
                 </Box>
               )}
               {section !== "Settings" && section !== "AI Settings" && (
                 <>
+                  {section === "Mailboxes" && <SyncFreshnessAlert readiness={readiness} />}
                   {section === "Employee List" ? (
                     <Box>
                       <Chip size="small" label={`${employeeListRows.length} active employees`} sx={{ mb: 2 }} />

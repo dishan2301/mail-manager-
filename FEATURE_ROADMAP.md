@@ -12,6 +12,13 @@ Updated 26 October 2026. This plan covers ideas F1–F22 from the owner’s road
 
 There is no fixed calendar promise. Advance when each phase's acceptance checks pass. The labels below indicate dependencies, not a requirement to merge a whole phase as one release.
 
+### Progress on `testing`
+
+- Phase 0: an automated two-round, shared-To conversation fixture now protects the message and reply-credit baseline. Remaining baseline fixtures and a recorded before/after count export are still needed before a status migration.
+- F5: the saved provider/model can be tested on demand using synthetic text; HTTP errors are shown without provider response bodies or keys. The proposed daily automatic AI check is still open.
+- F1: each active mailbox is assessed independently, with a dashboard/Mailboxes warning after `SYNC_STALE_AFTER_SECONDS` (default 900) and one admin email per stale period when delivery works. Test this with a controlled mailbox in the test deployment before release.
+- F2 and later phases: not started.
+
 ## Phase 0 — Baseline and metric definitions
 
 **Goal:** Know when the new features change numbers.

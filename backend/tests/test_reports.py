@@ -448,6 +448,33 @@ def test_shared_to_mail_is_pending_for_both_but_only_responder_gets_credit(repor
     assert exported_rows["2"]["replied"]=="0"
 
 
+def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db):
+    from app.repositories.email import EmailRepository
+    from app.services.sync import reconcile_replies
+    sessions, client = report_db
+    start = Clock.now(timezone.utc)
+    with sessions() as db:
+        db.get(Mailbox, 1).address = "ceo@indianinfotech.org"
+        first = mail(db, "round-one", start, receiver="one@indianinfotech.org, two@indianinfotech.org", conversation_id="meeting", internet_message_id="<round-one>")
+        employees = list(db.scalars(select(Employee)))
+        reconcile_replies(db, employees); db.commit()
+        performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
+        assert performance[1]["pending"] == performance[2]["pending"] == 1
+        mail(db, "answer-one", start + timedelta(minutes=10), sender="one@indianinfotech.org", receiver="customer@example.com", conversation_id="meeting", internet_message_id="<answer-one>", in_reply_to="<round-one>")
+        reconcile_replies(db, employees); db.commit()
+        second = mail(db, "round-two", start + timedelta(minutes=20), receiver="one@indianinfotech.org, two@indianinfotech.org", conversation_id="meeting", internet_message_id="<round-two>")
+        reconcile_replies(db, employees); db.commit()
+        assert first.status == EmailStatus.REPLIED and second.status == EmailStatus.PENDING
+        performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
+        assert performance[1]["pending"] == performance[2]["pending"] == 1
+        mail(db, "answer-two", start + timedelta(minutes=30), sender="two@indianinfotech.org", receiver="customer@example.com", conversation_id="meeting", internet_message_id="<answer-two>", in_reply_to="<round-two>")
+        reconcile_replies(db, employees); db.commit()
+        performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
+        assert all(performance[id]["received"] == 2 and performance[id]["pending"] == 0 and performance[id]["replied"] == 1 and performance[id]["replied_by_other"] == 1 for id in (1, 2))
+    report = client.get("/api/reports/monthly?dimension=employee").json()["rows"]
+    assert all(row["total_received"] == 2 for row in report)
+
+
 def test_recipient_migration_is_safe_on_current_schema(report_db):
     import importlib
     from alembic.migration import MigrationContext

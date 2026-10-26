@@ -9,11 +9,12 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import Email,EmailStatus,EscalationEvent,SLARule,SLATier,User,Role
+from app.models.entities import Email,EmailStatus,EscalationEvent,SLARule,SLATier,User,Role,Mailbox,MailboxStatus,SyncLog
 from app.services.content import content as ui_text
 from app.services.notifications import send_html
 from app.services.sync import sync_all_mailboxes
 from app.services.conversation_reviews import review_new_or_changed_conversations
+from app.services.sync_health import mailbox_freshness
 
 
 logger=logging.getLogger(__name__)
@@ -47,11 +48,32 @@ async def _run_with_lease(name:str,operation,timeout:int):
 
 
 async def run_sync_with_lease():
-    async def operation():await sync_all_mailboxes();process_escalations();return True
+    async def operation():await sync_all_mailboxes();process_escalations();process_sync_health_alerts();return True
     return await _run_with_lease("oeis:mailbox-sync",operation,max(300,get_settings().sync_interval_seconds*2))
 
 
 async def sync_job():return await run_sync_with_lease()
+
+
+def process_sync_health_alerts():
+    settings=get_settings();now=datetime.now(timezone.utc)
+    threshold=max(60,getattr(settings,"sync_stale_after_seconds",900))
+    with SessionLocal() as db:
+        admins=list(db.scalars(select(User).where(User.role==Role.ADMIN,User.active.is_(True))))
+        if not admins:return
+        for mailbox in db.scalars(select(Mailbox).where(Mailbox.status!=MailboxStatus.PAUSED)):
+            if not mailbox_freshness(mailbox,threshold,now)["stale"]:continue
+            sent=db.scalar(select(SyncLog.id).where(SyncLog.mailbox_id==mailbox.id,SyncLog.action=="sync_stale_alert",SyncLog.started_at>mailbox.last_synced_at).limit(1))
+            if sent:continue
+            subject="OEIS mailbox sync is stale"
+            body=f"<p>Mailbox {escape(mailbox.address)} last synced at {escape(str(mailbox.last_synced_at))} UTC. Dashboard counts may be incomplete.</p>"
+            try:
+                if not all(send_html(admin.email,subject,body) for admin in admins):continue
+            except Exception:
+                logger.warning("Could not send stale sync alert for mailbox %s",mailbox.id,exc_info=True)
+                continue
+            db.add(SyncLog(mailbox_id=mailbox.id,action="sync_stale_alert",started_at=now,finished_at=now,status="alert_sent"))
+            db.commit()
 
 
 def process_escalations():
