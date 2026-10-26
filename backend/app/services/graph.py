@@ -123,16 +123,15 @@ class GraphDeltaSync(IMailSyncStrategy):
     def _reply_url(self,address:str,message_id:str)->str:
         return f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/messages/{quote(message_id,safe='')}/reply"
     async def _folder(self,client,address,folder,url,token):
-        fields="id,conversationId,internetMessageId,conversationIndex,subject,from,toRecipients,receivedDateTime,sentDateTime,parentFolderId,internetMessageHeaders,categories";url=url or f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/mailFolders/{folder}/messages/delta?$select={fields}";items=[];refreshed=False;attempts=0;delta=url
+        fields="id,conversationId,internetMessageId,conversationIndex,subject,from,toRecipients,receivedDateTime,sentDateTime,parentFolderId,internetMessageHeaders,categories";url=url or f"https://graph.microsoft.com/v1.0/users/{quote(address,safe='@')}/mailFolders/{folder}/messages/delta?$select={fields}&$orderby=receivedDateTime+desc&$top=100";items=[];refreshed=False;attempts=0;delta=url
         while url:
-            response=await _with_request_retry(lambda: client.get(validate_graph_url(url,self.settings),headers={"Authorization":f"Bearer {token}"}),"Graph request failed")
+            response=await _with_request_retry(lambda: client.get(validate_graph_url(url,self.settings),headers={"Authorization":f"Bearer {token}","Prefer":"odata.maxpagesize=100"}),"Graph request failed")
             if response.status_code==401 and not refreshed:token=await self._token(True);refreshed=True;continue
             if response.status_code==429 and attempts<4:await asyncio.sleep(_retry_delay(response.headers.get("Retry-After"),attempts));attempts+=1;continue
             if response.status_code>=400:raise RuntimeError(_graph_error(response))
             response.raise_for_status();body=response.json()
             for item in body.get("value",[]):
                 item["_folder"]=folder;items.append(item)
-                if len(items)>self.settings.max_sync_messages:raise RuntimeError("Graph sync exceeds configured message limit")
             url=body.get("@odata.nextLink");delta=body.get("@odata.deltaLink",delta)
             if url:validate_graph_url(url,self.settings)
             if delta:validate_graph_url(delta,self.settings)
@@ -142,7 +141,6 @@ class GraphDeltaSync(IMailSyncStrategy):
         async with httpx.AsyncClient(timeout=30,follow_redirects=False) as client:
             for folder in FOLDERS:
                 items,cursor=await self._folder(client,address,folder,state.get(folder),token);all_items.extend(items);new_state[folder]=cursor
-                if len(all_items)>self.settings.max_sync_messages:raise RuntimeError("Graph sync exceeds configured message limit")
         return all_items,json.dumps(new_state)
 class DelegatedGraphDeltaSync(GraphDeltaSync):
     def __init__(self,settings:Settings,refresh_token:str,authority_tenant:str|None=None):
@@ -166,15 +164,14 @@ class DelegatedGraphDeltaSync(GraphDeltaSync):
         del address
         return f"https://graph.microsoft.com/v1.0/me/messages/{quote(message_id,safe='')}/reply"
     async def _folder(self,client,address,folder,url,token):
-        fields="id,conversationId,internetMessageId,conversationIndex,subject,from,toRecipients,receivedDateTime,sentDateTime,parentFolderId,internetMessageHeaders,categories";url=url or f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages/delta?$select={fields}";items=[];attempts=0;delta=url
+        fields="id,conversationId,internetMessageId,conversationIndex,subject,from,toRecipients,receivedDateTime,sentDateTime,parentFolderId,internetMessageHeaders,categories";url=url or f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages/delta?$select={fields}&$orderby=receivedDateTime+desc&$top=100";items=[];attempts=0;delta=url
         while url:
-            response=await _with_request_retry(lambda: client.get(validate_graph_url(url,self.settings),headers={"Authorization":f"Bearer {token}"}),"Graph request failed")
+            response=await _with_request_retry(lambda: client.get(validate_graph_url(url,self.settings),headers={"Authorization":f"Bearer {token}","Prefer":"odata.maxpagesize=100"}),"Graph request failed")
             if response.status_code==429 and attempts<4:await asyncio.sleep(_retry_delay(response.headers.get("Retry-After"),attempts));attempts+=1;continue
             if response.status_code>=400:raise RuntimeError(_graph_error(response))
             body=response.json()
             for item in body.get("value",[]):
                 item["_folder"]=folder;items.append(item)
-                if len(items)>self.settings.max_sync_messages:raise RuntimeError("Graph sync exceeds configured message limit")
             url=body.get("@odata.nextLink");delta=body.get("@odata.deltaLink",delta)
             if url:validate_graph_url(url,self.settings)
             if delta:validate_graph_url(delta,self.settings)

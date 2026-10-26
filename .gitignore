@@ -29,3 +29,6 @@ personal-demo.log
 *recovery*code*
 .vercel
 .env*
+*.backup
+tmp/
+set_both_login_passwords.py

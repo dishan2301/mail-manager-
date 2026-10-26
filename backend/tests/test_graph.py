@@ -1,4 +1,5 @@
 import asyncio,json
+import pytest
 from pathlib import Path
 from app.core.config import Settings
 from app.services import graph
@@ -16,6 +17,38 @@ class Client:
     async def get(self,url,headers):return Response(url)
 class TokenApp:
     def acquire_token_silent(self,*_,**__):return {"access_token":"token"}
+
+@pytest.mark.parametrize("adapter_type",[graph.GraphDeltaSync,graph.DelegatedGraphDeltaSync])
+@pytest.mark.parametrize("resume",[False,True])
+def test_large_mailbox_loads_all_pages_and_then_new_mail(monkeypatch,adapter_type,resume):
+    class PageResponse:
+        status_code=200;headers={}
+        def __init__(self,url):self.url=url
+        def raise_for_status(self):pass
+        def json(self):
+            folder=next(x for x in graph.FOLDERS if f"/{x}/" in self.url)
+            resumed="page=2" in self.url or self.url.endswith("/done")
+            ids=[102] if self.url.endswith("/done") else [101] if resumed else range(1,101)
+            return {"value":[{"id":f"{folder}-{i}"} for i in ids],
+                    "@odata.deltaLink" if resumed else "@odata.nextLink":f"https://graph.microsoft.com/{folder}/"+("done" if resumed else "?page=2")}
+    class PageClient(Client):
+        async def get(self,url,headers):
+            assert headers["Prefer"]=="odata.maxpagesize=100"
+            if "page=2" not in url and not url.endswith("/done"):
+                assert "$orderby=receivedDateTime+desc" in url and "$top=100" in url
+            return PageResponse(url)
+    adapter=adapter_type.__new__(adapter_type);adapter.settings=Settings()
+    async def token(force=False):return "token"
+    adapter._token=token
+    monkeypatch.setattr(graph.httpx,"AsyncClient",lambda **_:PageClient())
+    saved_state=json.dumps({folder:f"https://graph.microsoft.com/{folder}/?page=2" for folder in graph.FOLDERS}) if resume else None
+    first,state=asyncio.run(adapter.sync_mailbox("support@example.com",saved_state))
+    assert len(first)==len(graph.FOLDERS)*(1 if resume else 101)
+    assert all(cursor.endswith("/done") for cursor in json.loads(state).values())
+    second,state=asyncio.run(adapter.sync_mailbox("support@example.com",state))
+    assert len(second)==len(graph.FOLDERS)
+    assert not {item["id"] for item in first}&{item["id"] for item in second}
+    assert all(cursor.endswith("/done") for cursor in json.loads(state).values())
 
 def test_graph_sync_reads_every_required_folder(monkeypatch):
     adapter=graph.GraphDeltaSync.__new__(graph.GraphDeltaSync);adapter.settings=Settings();adapter.app=TokenApp();monkeypatch.setattr(graph.httpx,"AsyncClient",lambda **_:Client())

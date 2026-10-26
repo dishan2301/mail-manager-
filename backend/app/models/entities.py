@@ -1,6 +1,7 @@
 import enum
+import hashlib
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -28,6 +29,16 @@ class Employee(Base):
 class Email(Base):
     __tablename__="emails"; __table_args__=(UniqueConstraint("mailbox_id","message_id"),)
     id:Mapped[int]=mapped_column(primary_key=True); mailbox_id:Mapped[int]=mapped_column(ForeignKey("mailboxes.id")); message_id:Mapped[str]=mapped_column(String(512)); conversation_id:Mapped[str|None]=mapped_column(String(512)); internet_message_id:Mapped[str|None]=mapped_column(String(998)); in_reply_to:Mapped[str|None]=mapped_column(String(998)); references:Mapped[str|None]=mapped_column(Text); thread_index:Mapped[str|None]=mapped_column(Text); sender:Mapped[str]=mapped_column(String(320)); receiver:Mapped[str]=mapped_column(String(320)); subject:Mapped[str]=mapped_column(Text); received_time:Mapped[datetime]=mapped_column(DateTime(timezone=True)); sent_time:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); folder:Mapped[str]=mapped_column(String(80)); categories:Mapped[list]=mapped_column(JSON,default=list); classification:Mapped[Classification]=mapped_column(Enum(Classification)); status:Mapped[EmailStatus]=mapped_column(Enum(EmailStatus)); read_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); replied_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); pending_hours:Mapped[float]=mapped_column(Float,default=0); sla_tier:Mapped[SLATier]=mapped_column(Enum(SLATier),default=SLATier.HEALTHY); assigned_employee_id:Mapped[int|None]=mapped_column(ForeignKey("employees.id")); mailbox=relationship("Mailbox"); employee=relationship("Employee")
+    recipients=relationship("EmailRecipient",cascade="all, delete-orphan")
+
+
+class EmailRecipient(Base):
+    __tablename__="email_recipients"
+    email_id:Mapped[int]=mapped_column(ForeignKey("emails.id",ondelete="CASCADE"),primary_key=True)
+    employee_id:Mapped[int]=mapped_column(ForeignKey("employees.id",ondelete="CASCADE"),primary_key=True,index=True)
+    employee=relationship("Employee")
+
+
 class SLARule(Base):
     __tablename__="sla_rules"; id:Mapped[int]=mapped_column(primary_key=True); tier:Mapped[SLATier]=mapped_column(Enum(SLATier),unique=True); threshold_hours:Mapped[float]=mapped_column(Float); business_hours_only:Mapped[bool]=mapped_column(Boolean,default=True); notify_manager_at_hours:Mapped[float|None]=mapped_column(Float); notify_director_at_hours:Mapped[float|None]=mapped_column(Float)
 class BusinessCalendar(Base):
@@ -39,7 +50,13 @@ class EscalationEvent(Base):
 class SyncLog(Base):
     __tablename__="sync_logs"; id:Mapped[int]=mapped_column(primary_key=True); mailbox_id:Mapped[int]=mapped_column(ForeignKey("mailboxes.id")); action:Mapped[str]=mapped_column(String(80)); api_response:Mapped[str|None]=mapped_column(Text); errors:Mapped[str|None]=mapped_column(Text); started_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); finished_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); emails_fetched:Mapped[int]=mapped_column(Integer,default=0); emails_new:Mapped[int]=mapped_column(Integer,default=0); status:Mapped[str]=mapped_column(String(30))
 class UIContent(Base):
-    __tablename__="ui_content"; id:Mapped[int]=mapped_column(primary_key=True); source_text:Mapped[str]=mapped_column(Text,unique=True); rendered_text:Mapped[str]=mapped_column(Text); active:Mapped[bool]=mapped_column(Boolean,default=True)
+    __tablename__="ui_content"; __table_args__=(UniqueConstraint("source_text_sha256", name="uq_ui_content_source_text_sha256"),)
+    id:Mapped[int]=mapped_column(primary_key=True); source_text:Mapped[str]=mapped_column(Text); source_text_sha256:Mapped[str]=mapped_column(String(64),nullable=False); rendered_text:Mapped[str]=mapped_column(Text); active:Mapped[bool]=mapped_column(Boolean,default=True)
+
+@event.listens_for(UIContent, "before_insert")
+@event.listens_for(UIContent, "before_update")
+def _hash_ui_content_source(mapper, connection, row):
+    row.source_text_sha256 = hashlib.sha256(row.source_text.encode("utf-8")).hexdigest()
 class AuthSession(Base):
     __tablename__="auth_sessions"; id:Mapped[str]=mapped_column(String(64),primary_key=True); family_id:Mapped[str]=mapped_column(String(64),index=True); user_id:Mapped[int]=mapped_column(ForeignKey("users.id"),index=True); refresh_jti_hash:Mapped[str]=mapped_column(String(64)); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True); last_used_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); revoked_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),index=True); revoke_reason:Mapped[str|None]=mapped_column(String(80)); source_hash:Mapped[str|None]=mapped_column(String(64)); user_agent_hash:Mapped[str|None]=mapped_column(String(64))
 class LoginThrottle(Base):

@@ -41,7 +41,7 @@ async def lifespan(app:FastAPI):
             for name,kind in (("token_ciphertext","TEXT"),("token_nonce","VARCHAR(64)"),("token_key_id","VARCHAR(64)"),("provider_subject_id","VARCHAR(128)"),("provider_tenant_id","VARCHAR(128)")):
                 if name not in columns:conn.execute(text(f"ALTER TABLE mailboxes ADD COLUMN {name} {kind}"))
     with SessionLocal() as db:
-        if not db.scalar(select(User).where(User.email==settings.bootstrap_admin_email)):
+        if not db.scalar(select(User.id).where(User.role==Role.ADMIN).limit(1)):
             db.add(User(email=settings.bootstrap_admin_email,name=settings.bootstrap_admin_name,password_hash=hash_password(settings.bootstrap_admin_password),role=Role.ADMIN,active=True))
         defaults={SLATier.HEALTHY:0,SLATier.WARNING:4,SLATier.OVERDUE:8,SLATier.CRITICAL:24}
         for tier,hours in defaults.items():

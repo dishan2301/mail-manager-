@@ -13,7 +13,7 @@ def test_mailbox_employee_pending_assignment_and_report_workflow():
     with TestClient(app) as client:
         headers=auth(client)
         mailbox=client.post("/api/mailboxes",headers=headers,json={"address":"workflow@example.com","display_name":"Workflow mailbox","timezone":"Asia/Kolkata"});assert mailbox.status_code==201
-        employee=client.post("/api/employees",headers=headers,json={"name":"Test Employee","email":"employee@example.com","active":True});assert employee.status_code==201
+        employee=client.post("/api/employees",headers=headers,json={"name":"Test Employee","email":"employee@indianinfotech.org","active":True});assert employee.status_code==201
         with SessionLocal() as db:
             row=Email(mailbox_id=mailbox.json()["id"],message_id="workflow-message",conversation_id="conversation",internet_message_id="<workflow@example.com>",sender="customer@example.com",receiver="workflow@example.com",subject="Workflow customer request",received_time=datetime.now(timezone.utc),folder="inbox",categories=[],classification=Classification.CUSTOMER,status=EmailStatus.PENDING,pending_hours=9,sla_tier=SLATier.OVERDUE);db.add(row);db.commit();db.refresh(row);email_id=row.id
         pending=client.get("/api/emails/pending?search=Workflow&status=overdue",headers=headers);assert pending.status_code==200 and pending.json()["total"]==1

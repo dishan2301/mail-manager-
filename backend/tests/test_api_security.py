@@ -133,9 +133,9 @@ def test_admin_can_update_employee_and_user_administration_records():
     with TestClient(app) as client:
         login=client.post("/api/auth/login",data={"username":"admin@oeis.local","password":"OEIS-Admin@July2026#47"}).json()
         headers={"Authorization":f"Bearer {login['access_token']}"}
-        employee=client.post("/api/employees",json={"name":"Editable Employee","email":"editable-employee@example.com","active":True},headers=headers)
+        employee=client.post("/api/employees",json={"name":"Editable Employee","email":"editable-employee@indianinfotech.org","active":True},headers=headers)
         if employee.status_code==409:
-            employee_id=next(row["id"] for row in client.get("/api/employees",headers=headers).json() if row["email"]=="editable-employee@example.com")
+            employee_id=next(row["id"] for row in client.get("/api/employees",headers=headers).json() if row["email"]=="editable-employee@indianinfotech.org")
         else:employee_id=employee.json()["id"]
         updated=client.patch(f"/api/employees/{employee_id}",json={"name":"Updated Employee","active":False},headers=headers)
         assert updated.status_code==200 and updated.json()["name"]=="Updated Employee" and updated.json()["active"] is False
@@ -146,18 +146,33 @@ def test_admin_can_update_employee_and_user_administration_records():
         updated=client.patch(f"/api/users/{user_id}",json={"role":"admin","active":False},headers=headers)
         assert updated.status_code==200 and updated.json()["role"]=="admin" and updated.json()["active"] is False
 
+def test_admin_can_set_own_email_and_password():
+    with TestClient(app) as client:
+        login=client.post("/api/auth/login",data={"username":"admin@oeis.local","password":"OEIS-Admin@July2026#47"})
+        headers={"Authorization":f"Bearer {login.json()['access_token']}"}
+        created=client.post("/api/users",headers=headers,json={"name":"Self Edit Admin","email":"self-edit-before@example.com","password":"Initial-Self-Edit-123!","role":"admin"})
+        user_id=created.json()["id"]
+        own_login=client.post("/api/auth/login",data={"username":"self-edit-before@example.com","password":"Initial-Self-Edit-123!"})
+        own_headers={"Authorization":f"Bearer {own_login.json()['access_token']}"}
+        changed=client.patch(f"/api/users/{user_id}",headers=own_headers,json={"email":"self-edit-after@example.com","password":"New-Self-Edit-456!"})
+        assert changed.status_code==200 and changed.json()["reauthenticate"] is True
+        assert client.get("/api/users",headers=own_headers).status_code==401
+        assert client.post("/api/auth/login",data={"username":"self-edit-before@example.com","password":"Initial-Self-Edit-123!"}).status_code==401
+        assert client.post("/api/auth/login",data={"username":"self-edit-after@example.com","password":"New-Self-Edit-456!"}).status_code==200
+        assert client.patch(f"/api/users/{user_id}",headers=headers,json={"email":"admin@oeis.local"}).status_code==409
+
 def test_adding_existing_employee_updates_instead_of_conflict():
     with TestClient(app) as client:
         login=client.post("/api/auth/login",data={"username":"admin@oeis.local","password":"OEIS-Admin@July2026#47"}).json()
         headers={"Authorization":f"Bearer {login['access_token']}"}
-        first=client.post("/api/employees",json={"name":"Zzz First Name","email":"duplicate-employee@example.com","active":False},headers=headers)
+        first=client.post("/api/employees",json={"name":"Zzz First Name","email":"duplicate-employee@indianinfotech.org","active":False},headers=headers)
         assert first.status_code==201
-        second=client.post("/api/employees",json={"name":"Zzz Second Name","email":"DUPLICATE-EMPLOYEE@example.com","active":True},headers=headers)
+        second=client.post("/api/employees",json={"name":"Zzz Second Name","email":"DUPLICATE-EMPLOYEE@indianinfotech.org","active":True},headers=headers)
         assert second.status_code==201
         body=second.json()
         assert body["id"]==first.json()["id"]
         assert body["name"]=="Zzz Second Name"
-        assert body["email"]=="duplicate-employee@example.com"
+        assert body["email"]=="duplicate-employee@indianinfotech.org"
         assert body["active"] is True
 
 def test_admin_can_manage_dynamic_ui_content_and_public_reads_active_rows():

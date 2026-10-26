@@ -57,10 +57,10 @@ def _strong_password(value:str)->str:
     if value.lower() in {"passwordpassword","replace-before-first-start","oeis-admin@july2026#47"}:raise ValueError("Password is too common or is a known development password")
     return value
 class UserInput(BaseModel):
-    email:EmailStr;name:str=Field(min_length=1,max_length=120);password:str=Field(min_length=15,max_length=128);role:Role;active:bool=True
+    email:EmailStr;name:str=Field(min_length=1,max_length=120);password:str=Field(min_length=6,max_length=128);role:Role;active:bool=True
     _password_policy=field_validator("password")(_strong_password)
 class UserUpdate(BaseModel):
-    name:str|None=Field(default=None,min_length=1,max_length=120);password:str|None=Field(default=None,min_length=15,max_length=128);role:Role|None=None;active:bool|None=None
+    name:str|None=Field(default=None,min_length=1,max_length=120);email:EmailStr|None=None;password:str|None=Field(default=None,min_length=6,max_length=128);role:Role|None=None;active:bool|None=None
     _password_policy=field_validator("password")(_strong_password)
 class ManagerMailboxAccessInput(BaseModel):mailbox_ids:list[int]=Field(default_factory=list,max_length=500)
 class ReplyInput(BaseModel):body:str=Field(min_length=1,max_length=10000)

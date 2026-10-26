@@ -20,6 +20,7 @@ from app.services.review_rubric import score_saved_review
 from app.services.ai_provider import active_ai_settings
 
 logger = logging.getLogger(__name__)
+REVIEW_VERSION = 2
 
 
 def _utc(value: datetime) -> datetime:
@@ -37,7 +38,7 @@ def _thread_rows(db, mailbox_id: int, key: str, incoming: list[Email]) -> list[E
     rows = [message]
     internet_id = (message.internet_message_id or "").strip().strip("<>").casefold()
     if internet_id:
-        outgoing = db.scalars(select(Email).options(joinedload(Email.mailbox)).where(Email.mailbox_id == mailbox_id, Email.folder == "sentitems"))
+        outgoing = db.scalars(select(Email).options(joinedload(Email.mailbox)).where(Email.mailbox_id == mailbox_id, Email.folder.in_(["inbox", "sentitems"])))
         for email in outgoing:
             references = {part.strip().strip("<>").casefold() for part in (email.references or "").split()}
             in_reply_to = (email.in_reply_to or "").strip().strip("<>").casefold()
@@ -81,6 +82,7 @@ async def _save_rubric(review:ConversationAIReview,settings)->None:
     except Exception as exc:
         review.rubric={"retry_after":(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()}
         logger.warning("Rubric unavailable for review %s (%s)",review.id,type(exc).__name__)
+    review.rubric={**(review.rubric or {}),"review_version":REVIEW_VERSION}
 
 
 async def review_new_or_changed_conversations() -> dict:
@@ -112,12 +114,12 @@ async def review_new_or_changed_conversations() -> dict:
             thread = _thread_rows(db, mailbox_id, key, messages_inbox)
             last_message = _review_activity(db,thread)
             replies = [_utc(message.replied_at) for message in thread if message.replied_at]
-            sent = [_utc(message.sent_time or message.received_time) for message in thread if message.folder == "sentitems"]
+            sent = [_utc(message.sent_time or message.received_time) for message in thread if message.folder == "sentitems" or parseaddr(message.sender)[1].casefold()==employee.email.casefold()]
             if replies and (not sent or max(sent) < max(replies)-timedelta(minutes=2)):
                 continue  # The in-app reply must sync before its content can be reviewed.
             first_received = min((_utc(message.received_time) for message in messages_inbox), default=last_message)
             review = stored.get((mailbox_id, key, employee_id))
-            if review and review.status == "ready" and review.employee_id == employee.id and _utc(review.last_message_at) >= last_message:
+            if review and review.status == "ready" and review.employee_id == employee.id and _utc(review.last_message_at) >= last_message and (review.rubric or {}).get("review_version")==REVIEW_VERSION:
                 retry_after=(review.rubric or {}).get("retry_after")
                 if review.analysis and len(review.analysis)>=300 and (review.rubric is None or "actionability" not in review.rubric or retry_after and datetime.fromisoformat(retry_after)<=datetime.now(timezone.utc)):
                     await _save_rubric(review,settings)
@@ -160,7 +162,7 @@ async def review_new_or_changed_conversations() -> dict:
                         logger.warning("Message body unavailable for review email %s: %s", message.id, type(exc).__name__)
                         body = "[Message body unavailable from the mailbox provider. Use only the synced subject, dates, sender, status, and other supplied metadata; mark content-based findings as insufficient evidence.]"
                     _save_token(message, strategy, refresh_token, settings)
-                    speaker = "Customer" if message.folder == "inbox" else "Employee" if parseaddr(message.sender)[1].casefold() == employee.email.casefold() else "Unattributed outgoing"
+                    speaker = "Employee" if parseaddr(message.sender)[1].casefold() == employee.email.casefold() else "Customer" if message.folder == "inbox" else "Unattributed outgoing"
                     for offset in range(0,max(1,len(body)),40000):
                         part = body[offset:offset+40000]
                         if rendered_messages and (characters+len(part)>40000 or len(rendered_messages)>=200):
@@ -173,6 +175,7 @@ async def review_new_or_changed_conversations() -> dict:
                 review.analysis = analysis
                 if analysis and len(analysis)>=300:
                     await _save_rubric(review,settings)
+                review.rubric={**(review.rubric or {}),"review_version":REVIEW_VERSION}
                 review.status = "ready"
                 review.analyzed_at = datetime.now(timezone.utc)
                 review.error_code = None

@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -41,7 +41,7 @@ def report_db(monkeypatch):
     monkeypatch.setattr(routes, "audit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(reviews, "audit", lambda *_args, **_kwargs: None)
     with sessions() as db:
-        db.add_all([Mailbox(id=1, address="one@example.com", display_name="One"), Mailbox(id=2, address="two@example.com", display_name="Two"), Employee(id=1, name="Same Name", email="one@example.com", department="Support"), Employee(id=2, name="Same Name", email="two@example.com", department="Sales"), AIReviewSetting(id=1, enabled=True)])
+        db.add_all([Mailbox(id=1, address="one@indianinfotech.org", display_name="One"), Mailbox(id=2, address="two@indianinfotech.org", display_name="Two"), Employee(id=1, name="Same Name", email="one@indianinfotech.org", department="Support"), Employee(id=2, name="Same Name", email="two@indianinfotech.org", department="Sales"), AIReviewSetting(id=1, enabled=True)])
         db.commit()
     app = FastAPI()
     app.include_router(routes.router)
@@ -56,7 +56,7 @@ def report_db(monkeypatch):
 
 
 def mail(db, message_id, when=None, **values):
-    values = {"mailbox_id": 1, "message_id": message_id, "conversation_id": message_id, "sender": "customer@example.com", "receiver": "one@example.com", "subject": "Request", "received_time": when or Clock.now(timezone.utc), "folder": "inbox", "classification": Classification.CUSTOMER, "status": EmailStatus.PENDING, "assigned_employee_id": 1, **values}
+    values = {"mailbox_id": 1, "message_id": message_id, "conversation_id": message_id, "sender": "customer@example.com", "receiver": "one@indianinfotech.org", "subject": "Request", "received_time": when or Clock.now(timezone.utc), "folder": "inbox", "classification": Classification.CUSTOMER, "status": EmailStatus.PENDING, "assigned_employee_id": 1, **values}
     row = Email(**values)
     db.add(row)
     db.commit()
@@ -116,7 +116,7 @@ def test_cache_skips_unchanged_and_detects_outgoing_reply(report_db, monkeypatch
     assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"] == 0
     assert calls == ["thread"]
     with sessions() as db:
-        mail(db, "outgoing", Clock.now(timezone.utc) + timedelta(minutes=5), conversation_id="thread", folder="sentitems", sender="one@example.com")
+        mail(db, "outgoing", Clock.now(timezone.utc) + timedelta(minutes=5), conversation_id="thread", folder="sentitems", sender="one@indianinfotech.org")
     result = client.get("/api/reports/monthly/employees/1/ai-review").json()
     assert result["pending_count"] == 1 and result["reviews"][0]["analysis"] is None
     assert calls == ["thread"]  # Viewing a report never fetches mail or calls AI.
@@ -224,7 +224,7 @@ def test_unsynced_reply_waits_and_assistant_events_invalidate_cache(report_db, m
     assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"] == 0
     assert calls == ["thread"]
     with sessions() as db:
-        mail(db, "sent", Clock.now(timezone.utc) + timedelta(minutes=5), folder="sentitems", conversation_id="thread", sender="one@example.com")
+        mail(db, "sent", Clock.now(timezone.utc) + timedelta(minutes=5), folder="sentitems", conversation_id="thread", sender="one@indianinfotech.org")
     assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"] == 1
     with sessions() as db:
         db.add(SecurityAuditEvent(action="email.reply.assist", outcome="success", object_type="email", object_id=str(email_id), created_at=Clock.now(timezone.utc) + timedelta(minutes=10), details={"mode":"rewrite", "has_employee_draft":True, "input_word_count":25}))
@@ -382,7 +382,7 @@ def test_reply_arriving_during_review_is_queued_for_an_update(report_db, monkeyp
     fake_provider(monkeypatch)
     async def analyze(*_):
         with sessions() as db:
-            mail(db, "new-reply", Clock.now(timezone.utc)+timedelta(minutes=1), conversation_id="thread", folder="sentitems", sender="one@example.com")
+            mail(db, "new-reply", Clock.now(timezone.utc)+timedelta(minutes=1), conversation_id="thread", folder="sentitems", sender="one@indianinfotech.org")
         return "Findings before the new reply arrived"
     monkeypatch.setattr(reviews, "review_employee_conversations", analyze)
     assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"] == 1
@@ -391,3 +391,137 @@ def test_reply_arriving_during_review_is_queued_for_an_update(report_db, monkeyp
     fake_provider(monkeypatch)
     assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"] == 1
     assert client.get("/api/reports/monthly/employees/1/ai-review").json()["reviewed_count"] == 1
+
+
+def test_shared_to_mail_is_pending_for_both_but_only_responder_gets_credit(report_db):
+    from app.models.entities import EmailRecipient
+    from app.repositories.email import EmailRepository
+    from app.services.sync import reconcile_replies
+    sessions,client=report_db
+    with sessions() as db:
+        db.get(Mailbox,1).address="ceo@example.com"
+        original=mail(db,"shared-request",receiver="one@indianinfotech.org, two@indianinfotech.org",internet_message_id="<request>",conversation_id="shared")
+        employees=list(db.scalars(select(Employee)))
+        reconcile_replies(db,employees);db.commit()
+        original_id=original.id
+        assert len(db.scalars(select(EmailRecipient)).all())==2
+        performance={row["id"]:row for row in EmailRepository(db).employee_performance([1])}
+        assert all(performance[id]["received"]==performance[id]["pending"]==1 for id in (1,2))
+        assert all(performance[id]["replied"]==0 for id in (1,2))
+    result=client.get("/api/reports/monthly?dimension=employee")
+    assert result.status_code==200,result.text
+    report={row["employee_id"]:row for row in result.json()["rows"]}
+    assert report[1]["not_replied"]==report[2]["not_replied"]==1
+    for employee_id in (1,2):
+        result=client.get(f"/api/emails/pending?employee={employee_id}&status=pending")
+        assert result.status_code==200,result.text
+        assert result.json()["total"]==1
+    with sessions() as db:
+        mail(db,"reply",Clock.now(timezone.utc)+timedelta(minutes=30),sender="one@indianinfotech.org",receiver="customer@example.com",conversation_id="shared",internet_message_id="<answer>",in_reply_to="<request>")
+        # Received in the CEO inbox; no access to either employee's Sent folder.
+        reconcile_replies(db,list(db.scalars(select(Employee))));db.commit()
+        reconcile_replies(db,list(db.scalars(select(Employee))));db.commit()
+        performance={row["id"]:row for row in EmailRepository(db).employee_performance([1])}
+        assert performance[1]["replied"]==1
+        assert performance[1]["received"]==1
+        assert performance[1]["pending"]==performance[2]["pending"]==0
+        assert performance[2]["received"]==1
+        assert performance[2]["replied"]==0
+        assert performance[2]["replied_by_other"]==1
+        trend=EmailRepository(db).employee_trend(2,days=None,mailbox_ids=[1])
+        assert sum(row["replied_by_other"] for row in trend)==1
+        assert sum(row["replied"] for row in trend)==0
+        assert len(db.scalars(select(EmailRecipient)).all())==2
+    report={row["employee_id"]:row for row in client.get("/api/reports/monthly?dimension=employee").json()["rows"]}
+    assert report[1]["replied"]==1 and report[1]["not_replied"]==0
+    assert report[2]["total_received"]==1 and report[2]["not_replied"]==0
+    assert report[2]["replied"]==0 and report[2]["replied_by_other"]==1
+    assert report[2]["reply_rate"]==0
+    mail_report=client.get("/api/reports/monthly/employees/2/mail").json()["mails"]
+    original=next(row for row in mail_report if row["id"]==original_id)
+    assert original["replied_by_you"] is False
+    assert original["status_label"].startswith("Not replied by you")
+    assert original["replied_by"]=="Same Name"
+    exported=client.get("/api/reports/monthly/export?dimension=employee&format=csv")
+    exported_rows={row["employee_id"]:row for row in csv.DictReader(StringIO(exported.content.decode("utf-8-sig")))}
+    assert exported_rows["2"]["replied_by_other"]=="1"
+    assert exported_rows["2"]["replied"]=="0"
+
+
+def test_recipient_migration_is_safe_on_current_schema(report_db):
+    import importlib
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect
+    sessions,_=report_db
+    migration=importlib.import_module("migrations.versions.0015_email_recipients")
+    with sessions.kw["bind"].begin() as connection:
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+            migration.downgrade()
+            migration.upgrade()
+            migration.upgrade()
+        assert "email_recipients" in inspect(connection).get_table_names()
+        assert connection.scalar(select(func.count()).select_from(Employee))==2
+
+
+def test_ceo_inbox_employee_reply_is_reviewed_and_can_receive_quality_scores(report_db,monkeypatch):
+    sessions,client=report_db
+    when=Clock.now(timezone.utc)
+    with sessions() as db:
+        db.get(Mailbox,1).address="ceo@example.com"
+        mail(db,"request",when,conversation_id="watched",status=EmailStatus.REPLIED,replied_at=when+timedelta(minutes=5))
+        mail(db,"employee-response",when+timedelta(minutes=5),conversation_id="watched",sender="one@indianinfotech.org",receiver="customer@example.com",status=EmailStatus.IGNORED,assigned_employee_id=None)
+    seen=[]
+    fake_provider(monkeypatch)
+    async def analyze(*args):
+        messages=args[-1][0]["messages"]
+        seen.extend(message["handled_by"] for message in messages)
+        return "The employee replied with a clear acknowledgement and next action. "*10
+    async def rubric(*_):
+        return {factor:{"score":80,"reason":"Employee reply text supplies evidence."} for factor in ("professionalism","detail","clarity","ownership","actionability")}
+    monkeypatch.setattr(reviews,"review_employee_conversations",analyze)
+    monkeypatch.setattr(reviews,"score_saved_review",rubric)
+    assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"]==1
+    assert seen==["Customer","Employee"]
+    result=client.get("/api/reports/monthly/employees/1/ai-review").json()
+    assert result["reviewed_count"]==1
+    assert result["work_score"]["score"] is not None
+    assert result["work_score"]["assessed_points"]==100
+    assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"]==0
+
+
+def test_old_review_attribution_is_refreshed_once_after_upgrade(report_db,monkeypatch):
+    sessions,client=report_db
+    with sessions() as db:mail(db,"request")
+    fake_provider(monkeypatch)
+    assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"]==1
+    with sessions() as db:
+        saved=db.scalar(select(ConversationAIReview))
+        saved.analysis="Awaiting employee reply"
+        saved.rubric={}
+        db.commit()
+    assert client.get("/api/reports/monthly/employees/1/ai-review").json()["pending_count"]==1
+    assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"]==1
+    assert asyncio.run(reviews.review_new_or_changed_conversations())["reviewed"]==0
+
+
+def test_employee_directory_and_manual_entries_require_company_domain(report_db):
+    from app.repositories.email import EmailRepository
+    sessions,client=report_db
+    client.app.dependency_overrides[routes.admin.dependency]=lambda:{"user_id":1,"role":"admin"}
+    with sessions() as db:
+        db.add(Employee(name="External",email="sender@outside.com",active=True))
+        db.commit()
+    response=client.post("/api/employees",json={"name":"Customer","email":"customer@outside.com","active":True})
+    assert response.status_code==422
+    created=client.post("/api/employees",json={"name":"New employee","email":"NEW@indianinfotech.org","active":True})
+    assert created.status_code==201,created.text
+    employee_id=created.json()["id"]
+    response=client.patch(f"/api/employees/{employee_id}",json={"email":"wrong@outside.com"})
+    assert response.status_code==422
+    directory=client.get("/api/employees").json()
+    assert len(directory)==3
+    assert all(row["email"].casefold().endswith("@indianinfotech.org") for row in directory)
+    with sessions() as db:
+        assert "External" not in {row["employee"] for row in EmailRepository(db).employee_performance()}

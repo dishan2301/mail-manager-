@@ -1,5 +1,9 @@
 # OEIS — Office Email Intelligence System
 
+## Branch workflow
+
+`main` is the stable MVP/release branch. Make daily changes on `testing` or on a feature branch created from `testing` (`git switch testing && git pull && git switch -c feature/my-change`). Push and test changes there. When a change is ready, open a pull request from `testing` into `main`, review the diff and checks, then merge. Do not commit routine feature work directly to `main`. After merging, update `testing` from `main` before starting the next change.
+
 Production-oriented single-tenant, multi-mailbox Microsoft 365 and Gmail SLA monitoring. The authoritative requirements are in `project.docx`.
 
 ## Stack
@@ -9,6 +13,24 @@ Production-oriented single-tenant, multi-mailbox Microsoft 365 and Gmail SLA mon
 - Redis and APScheduler (5-minute mailbox sync; 18:00 daily summary by default)
 - React, TypeScript, Material UI, Chart.js
 - Docker Compose for local and production-like deployment
+
+## Run with Docker (single image)
+
+Build locally with `docker build -t oeis .`, or use the image published from a `v*` tag:
+
+```bash
+docker run -d --name oeis -p 8000:8000 -v oeis-data:/data \
+  -e BOOTSTRAP_ADMIN_EMAIL=you@yourcompany.com \
+  -e GOOGLE_CLIENT_ID=... -e GOOGLE_CLIENT_SECRET=... \
+  ghcr.io/dishan2301/oeis:latest
+docker logs oeis
+```
+
+Open `http://localhost:8000`. First start generates the admin password and security secrets; the password appears in the logs and is stored with the secrets in the `oeis-data` volume. SQLite data and secrets survive container recreation. Supply other settings with `-e` flags, including `GOOGLE_REDIRECT_URI` or `ALLOWED_HOSTS` when using another hostname. Back up the volume before replacing or moving the container.
+
+This single-container mode uses SQLite and HTTP for one machine or a small trusted team. Use the Compose deployment and HTTPS for an internet-facing installation.
+
+If the login password is wrong, reset the existing account in the running container with `docker exec -it oeis python -m scripts.reset_login_password --email you@yourcompany.com` (use `sudo docker` if your user cannot access Docker). Changing `BOOTSTRAP_ADMIN_PASSWORD` only affects creation of a new account; it does not update an existing login.
 
 ## Local start
 

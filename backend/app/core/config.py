@@ -81,7 +81,7 @@ class Settings(BaseSettings):
             key=base64.urlsafe_b64decode(self.token_encryption_key.encode())
         except Exception as exc:raise RuntimeError("TOKEN_ENCRYPTION_KEY must be URL-safe base64") from exc
         if len(key)!=32:raise RuntimeError("TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes")
-        if len(self.bootstrap_admin_password)<16 or self.bootstrap_admin_password in {"replace-before-first-start","OEIS-Admin@July2026#47"}:raise RuntimeError("Production bootstrap Admin password is insecure")
+        if len(self.bootstrap_admin_password)<6 or self.bootstrap_admin_password in {"replace-before-first-start","OEIS-Admin@July2026#47"}:raise RuntimeError("Production bootstrap Admin password must have at least 6 characters and not use a known default")
         if self.database_url.startswith("sqlite"):raise RuntimeError("Production DATABASE_URL must not use SQLite")
         database_lower=self.database_url.lower()
         if database_lower.startswith("mssql") and ("encrypt=yes" not in database_lower or "trustservercertificate=no" not in database_lower):raise RuntimeError("Production SQL Server connection must verify TLS certificates")

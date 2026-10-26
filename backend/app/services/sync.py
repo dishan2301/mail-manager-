@@ -1,9 +1,11 @@
 from datetime import date,datetime,time,timezone
+from email.utils import getaddresses
 from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import BusinessCalendar,ClassificationRule,Email,EmailStatus,Employee,Mailbox,MailboxStatus,SLARule,SLATier,SyncLog
+from app.models.entities import BusinessCalendar,ClassificationRule,Email,EmailRecipient,EmailStatus,Employee,Mailbox,MailboxStatus,SLARule,SLATier,SyncLog
 from app.services.classification import Rule,classify
+from app.services.employees import is_company_employee_email
 from app.services.graph import DelegatedGraphDeltaSync,GraphDeltaSync,delegated_authority_tenant
 from app.services.gmail import GmailDeltaSync
 from app.services.sla import Calendar,elapsed_hours,tier_for
@@ -14,13 +16,26 @@ def _text(value,max_length:int)->str:return str(value or "")[:max_length]
 def _headers(item:dict)->dict[str,str]:return {_text(h.get("name"),120).lower():_text(h.get("value"),8000) for h in item.get("internetMessageHeaders",[])[:200]}
 def _recipients(item:dict,fallback:str)->str:
     addresses=[row.get("emailAddress",{}).get("address") for row in item.get("toRecipients",[])]
-    return _text(", ".join(address for address in addresses if address) or fallback,320)
+    return _text(", ".join(address for address in addresses if address),320)
 def _assignee(receiver:str, mailbox_address:str, employees:list[Employee])->int|None:
     by_address={employee.email.strip().lower():employee.id for employee in employees if employee.active}
-    for address in [mailbox_address,*receiver.replace(";",",").split(",")]:
+    for address in receiver.replace(";",",").split(","):
         employee_id=by_address.get(address.strip().lower())
         if employee_id is not None:return employee_id
     return None
+def _discover_to_employees(db,recipients):
+    existing=list(db.scalars(select(Employee).order_by(Employee.id)))
+    for employee in existing:
+        if not is_company_employee_email(employee.email):employee.active=False
+    by_address={row.email.strip().casefold():row for row in existing}
+    for name,address in recipients:
+        address=address.strip().casefold()
+        if len(address)>320 or not is_company_employee_email(address):continue
+        if address in by_address:continue
+        employee=Employee(name=_text(name.strip() or address.split("@",1)[0],120),email=address,department="General",active=True)
+        db.add(employee);existing.append(employee);by_address[address]=employee
+    db.flush()
+    return [row for row in existing if row.active]
 def _transient_sync_error(exc:Exception)->bool:
     message=f"{type(exc).__name__}: {exc}".lower()
     return any(token in message for token in ("nameresolutionerror","temporary failure","failed to resolve","httpsconnectionpool","connectionerror","connecttimeout","readtimeout","network is unreachable"))
@@ -51,6 +66,7 @@ async def sync_all_mailboxes():
                     strategy=DelegatedGraphDeltaSync(mailbox_settings,refresh_token,delegated_authority_tenant(mailbox.address,mailbox_settings)) if refresh_token else GraphDeltaSync(mailbox_settings)
                 items,delta=await strategy.sync_mailbox(mailbox.address,mailbox.delta_link);fetched=len(items)
                 if mailbox.provider=="microsoft" and refresh_token:mailbox.graph_auth_type="delegated";set_mailbox_token(mailbox,strategy.latest_refresh_token,settings)
+                employees=_discover_to_employees(db,[(recipient.get("emailAddress",{}).get("name") or "",recipient.get("emailAddress",{}).get("address") or "") for item in items if item.get("_folder")=="inbox" and "@removed" not in item for recipient in item.get("toRecipients",[])])
                 for item in items:
                     if "@removed" in item:continue
                     message_id=_text(item.get("id"),512)
@@ -66,17 +82,10 @@ async def sync_all_mailboxes():
                         if folder=="inbox" and existing.assigned_employee_id is None:
                             existing.assigned_employee_id=_assignee(values["receiver"],mailbox.address,employees)
                     else:
-                        # Prefer the receiving mailbox owner, including delivery through CC, BCC or aliases.
+                        # Final reconciliation below excludes observer copies.
                         if folder=="inbox":
                             values["assigned_employee_id"]=_assignee(values["receiver"],mailbox.address,employees)
                         db.add(Email(mailbox_id=mailbox.id,message_id=message_id,**values));new+=1
-                db.flush();incoming=list(db.scalars(select(Email).where(Email.mailbox_id==mailbox.id,Email.status==EmailStatus.PENDING,Email.folder=="inbox")));sent=list(db.scalars(select(Email).where(Email.mailbox_id==mailbox.id,Email.folder=="sentitems")))
-                for received_mail in incoming:
-                    received_mail.pending_hours=elapsed_hours(received_mail.received_time,datetime.now(timezone.utc),calendar,business_only);received_mail.sla_tier=tier_for(received_mail.pending_hours,thresholds or None)
-                    source=MessageRef(received_mail.internet_message_id,received_mail.conversation_id,received_mail.subject,received_mail.received_time)
-                    for sent_mail in sent:
-                        candidate=MessageRef(sent_mail.internet_message_id,sent_mail.conversation_id,sent_mail.subject,sent_mail.sent_time or sent_mail.received_time,sent_mail.in_reply_to,sent_mail.references)
-                        if is_reply(source,candidate):received_mail.status=EmailStatus.REPLIED;received_mail.replied_at=candidate.timestamp;received_mail.pending_hours=elapsed_hours(received_mail.received_time,candidate.timestamp,calendar,business_only);break
                 mailbox.delta_link=delta or mailbox.delta_link;mailbox.last_synced_at=datetime.now(timezone.utc);mailbox.last_sync_error=None;mailbox.status=MailboxStatus.ACTIVE;status="success"
             except Exception as exc:
                 message=str(exc).strip() or "Synchronization failed"
@@ -90,3 +99,75 @@ async def sync_all_mailboxes():
                     mailbox.status=MailboxStatus.ERROR
                     status="failed"
             finished=datetime.now(timezone.utc);db.add(SyncLog(mailbox_id=mailbox.id,action=f"{mailbox.provider}_delta_sync",api_response=f"fetched={fetched};new={new}" if not error else None,errors=error,started_at=started,finished_at=finished,emails_fetched=fetched,emails_new=new,status=status));db.commit()
+        reconcile_replies(db,employees)
+        db.commit()
+
+
+def reconcile_replies(db,employees):
+    """To recipients owe replies; the actual responding employee earns credit."""
+    mailboxes={row.id:row for row in db.scalars(select(Mailbox))}
+    rows=list(db.scalars(select(Email).order_by(Email.received_time,Email.id)))
+    # Backfill To recipients from already saved messages, even on an empty delta sync.
+    employees=_discover_to_employees(db,getaddresses([row.receiver.replace(";",",") for row in rows if row.folder=="inbox"]))
+    employees_by_address={row.email.strip().casefold():row.id for row in employees if row.active}
+    replies=[row for row in rows if row.sender.strip().casefold() in employees_by_address and row.classification.value=="Customer"]
+    by_header={};by_conversation={}
+    for reply in replies:
+        for target in set((reply.references or "").split()+[(reply.in_reply_to or "").strip()]):
+            if target:by_header.setdefault(target,[]).append(reply)
+        if reply.conversation_id:by_conversation.setdefault((reply.mailbox_id,reply.conversation_id),[]).append(reply)
+    groups={}
+    for row in rows:
+        if row.folder!="inbox" or row.classification.value!="Customer":continue
+        key=("message",row.internet_message_id.strip().casefold()) if row.internet_message_id else ("local",row.mailbox_id,row.message_id)
+        groups.setdefault(key,[]).append(row)
+    calendars={row.mailbox_id:row for row in db.scalars(select(BusinessCalendar))}
+    rules=list(db.scalars(select(SLARule)))
+    thresholds={row.tier:row.threshold_hours for row in rules}
+    business_only=all(row.business_hours_only for row in rules) if rules else True
+    response_ids=set()
+    recipients_by_email={}
+    for recipient in db.scalars(select(EmailRecipient)):
+        recipients_by_email.setdefault(recipient.email_id,[]).append(recipient)
+    for copies in groups.values():
+        direct=[row for row in copies if mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")}]
+        primary=(direct or copies)[0]
+        source=MessageRef(primary.internet_message_id,primary.conversation_id,primary.subject,primary.received_time)
+        matches=[]
+        copy_ids={row.id for row in copies}
+        candidates={reply.id:reply for reply in by_header.get((primary.internet_message_id or "").strip(),[])}
+        for copy in copies:
+            for reply in by_conversation.get((copy.mailbox_id,copy.conversation_id),[]):candidates[reply.id]=reply
+        for reply in candidates.values():
+            if reply.id in copy_ids or reply.sender.strip().casefold()==primary.sender.strip().casefold():continue
+            # Header links work across mailboxes; conversation IDs are mailbox scoped.
+            local_source=next((copy for copy in copies if copy.mailbox_id==reply.mailbox_id),primary)
+            source=MessageRef(local_source.internet_message_id,local_source.conversation_id,local_source.subject,local_source.received_time)
+            candidate=MessageRef(reply.internet_message_id,reply.conversation_id if reply.mailbox_id==local_source.mailbox_id else None,reply.subject,reply.sent_time or reply.received_time,reply.in_reply_to,reply.references)
+            if _utc(candidate.timestamp)>=_utc(source.timestamp) and is_reply(source,candidate):matches.append(reply)
+        match=min(matches,key=lambda row:_utc(row.sent_time or row.received_time)) if matches else None
+        for response in matches:
+            response_ids.add((response.internet_message_id or "").strip().casefold() or (response.mailbox_id,response.message_id))
+        for row in copies:
+            for recipient in recipients_by_email.get(row.id,[]):db.delete(recipient)
+            row.status=EmailStatus.IGNORED;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+        if _assignee(primary.receiver,"",employees) is None and match is None:continue
+        to_ids={employees_by_address[address.strip().casefold()] for address in primary.receiver.replace(";",",").split(",") if address.strip().casefold() in employees_by_address}
+        for employee_id in to_ids:db.add(EmailRecipient(email_id=primary.id,employee_id=employee_id))
+        primary.status=EmailStatus.REPLIED if match else EmailStatus.PENDING
+        primary.assigned_employee_id=employees_by_address[match.sender.strip().casefold()] if match else _assignee(primary.receiver,mailboxes[primary.mailbox_id].address,employees)
+        primary.replied_at=(match.sent_time or match.received_time) if match else None
+        mailbox=mailboxes[primary.mailbox_id];saved=calendars.get(mailbox.id) or calendars.get(None)
+        calendar=Calendar(timezone=mailbox.timezone,start=time.fromisoformat(saved.workday_start) if saved else time(9),end=time.fromisoformat(saved.workday_end) if saved else time(18),weekdays=tuple(saved.weekdays) if saved else (0,1,2,3,4),holidays=frozenset(date.fromisoformat(value) for value in saved.holidays) if saved else frozenset())
+        primary.pending_hours=elapsed_hours(primary.received_time,primary.replied_at or datetime.now(timezone.utc),calendar,business_only)
+        primary.sla_tier=tier_for(primary.pending_hours,thresholds or None)
+    db.flush()
+    for row in rows:
+        identity=(row.internet_message_id or "").strip().casefold() or (row.mailbox_id,row.message_id)
+        if row.folder=="inbox" and identity in response_ids:
+            for recipient in list(db.scalars(select(EmailRecipient).where(EmailRecipient.email_id==row.id))):db.delete(recipient)
+            row.status=EmailStatus.IGNORED;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+
+
+def _utc(value):
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

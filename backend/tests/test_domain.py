@@ -37,4 +37,4 @@ def test_settings_reject_invalid_regex_and_business_calendar():
 def test_graph_recipients_are_persisted_instead_of_mailbox_fallback():
     item={"toRecipients":[{"emailAddress":{"address":"first@example.com"}},{"emailAddress":{"address":"second@example.com"}}]}
     assert _recipients(item,"support@example.com")=="first@example.com, second@example.com"
-    assert _recipients({},"support@example.com")=="support@example.com"
+    assert _recipients({},"support@example.com")==""

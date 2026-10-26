@@ -92,7 +92,7 @@ echo "$BACKEND_PID" >"$BACKEND_PID_FILE"
 
 echo "Starting dashboard on $APP_URL"
 cd "$FRONTEND_DIR"
-setsid npm run dev -- --host 127.0.0.1 --port 8080 \
+setsid npm run dev -- --host 127.0.0.1 --port 8080 --strictPort \
   >"$RUN_DIR/frontend.log" 2>&1 < /dev/null &
 FRONTEND_PID=$!
 cd "$ROOT_DIR"
@@ -101,6 +101,10 @@ echo "$FRONTEND_PID" >"$FRONTEND_PID_FILE"
 for _ in {1..20}; do
   if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
     echo "Backend failed. Log: $BACKEND_LOG_FILE"
+    exit 1
+  fi
+  if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+    echo "Dashboard failed. Port 8080 may be in use. Log: $RUN_DIR/frontend.log"
     exit 1
   fi
   if curl -fsS "$API_URL/api/health" >/dev/null 2>&1 && curl -fsS "$APP_URL/" >/dev/null 2>&1; then

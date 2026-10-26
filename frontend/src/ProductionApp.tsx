@@ -89,6 +89,7 @@ ChartJS.register(
 const sections: { name: string; description: string; icon: ReactNode }[] = [
   { name: "Dashboard", description: "", icon: <Dashboard /> },
   { name: "Pending Emails", description: "", icon: <Email /> },
+  { name: "Employee List", description: "Names and email addresses", icon: <Groups /> },
   { name: "Employee Performance", description: "", icon: <Groups /> },
   { name: "Reports", description: "", icon: <Assessment /> },
   { name: "Mailboxes", description: "", icon: <Mail /> },
@@ -99,8 +100,12 @@ const sections: { name: string; description: string; icon: ReactNode }[] = [
   { name: "AI Settings", description: "Choose provider and model", icon: <AutoAwesome /> },
 ];
 const departments = ["Sales", "Support", "HRMS"];
-const sectionMeta: Record<string, { eyebrow: string; description: string }> = {};
-const emptyStateMeta: Record<string, { title: string; description: string }> = {};
+const sectionMeta: Record<string, { eyebrow: string; description: string }> = {
+  "Employee List": { eyebrow: "EMPLOYEES", description: "Review employees with @indianinfotech.org email addresses. Edit or remove incorrect entries." },
+};
+const emptyStateMeta: Record<string, { title: string; description: string }> = {
+  "Employee List": { title: "No employees yet", description: "Employees with @indianinfotech.org addresses discovered in incoming To recipients appear here." },
+};
 const tourTargets: Record<string, string> = {
   "Pending Emails": "pending-nav",
   "Employee Performance": "performance-nav",
@@ -113,6 +118,7 @@ const tourTargets: Record<string, string> = {
   "AI Settings": "ai-settings-nav",
 };
 const sectionContentKeys: Record<string, string> = {
+  "Employee List": "employee_list",
   Dashboard: "dashboard",
   "Pending Emails": "pending",
   "Employee Performance": "performance",
@@ -208,7 +214,7 @@ function refreshAccessToken() {
   if (!refreshInFlight) {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 5000);
-    refreshInFlight = fetch("/api/auth/refresh", { method: "POST", signal: controller.signal })
+    refreshInFlight = fetch("/api/auth/refresh", { method: "POST", credentials: "include", signal: controller.signal })
       .then(async (response) => response.ok ? (await response.json()).access_token : null)
       .catch(() => null)
       .finally(() => window.clearTimeout(timeout))
@@ -220,6 +226,7 @@ async function api(path: string, token: string, options: RequestInit = {}) {
   const request = (accessToken: string) =>
     fetch(`/api${path}`, {
       ...options,
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
@@ -321,7 +328,7 @@ function OeisLogo({ compact = false }: { compact?: boolean }) {
 }
 function Login({ onLogin }: { onLogin: (token: string) => void }) {
   const { text } = useContent();
-  const [email, setEmail] = useState("admin@oeis.local"),
+  const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [showPassword, setShowPassword] = useState(false),
     [error, setError] = useState(""),
@@ -1534,8 +1541,8 @@ function ReferenceDashboard({
           </Box>
         </Card>
         <Card className="reference-reminder">
-          <Box className="reference-card-head"><Box><span>{text("dashboard.next_move")}</span><b>{critical ? text("dashboard.resolve_critical") : overdue ? text("dashboard.clear_overdue") : text("dashboard.verify_flow")}</b></Box></Box>
-          <p>{critical ? format("dashboard.critical_sentence", { count: critical }) : overdue ? format("dashboard.overdue_sentence", { count: overdue }) : text("dashboard.verify_sentence")}</p>
+          <Box className="reference-card-head"><Box><span>{text("dashboard.next_move")}</span><b>{critical ? text("dashboard.resolve_critical") : overdue ? text("dashboard.clear_overdue") : readiness?.last_successful_sync ? text("dashboard.review_workload") : text("dashboard.verify_flow")}</b></Box></Box>
+          <p>{critical ? format("dashboard.critical_sentence", { count: critical }) : overdue ? format("dashboard.overdue_sentence", { count: overdue }) : readiness?.last_successful_sync ? text("dashboard.review_workload_sentence") : text("dashboard.verify_sentence")}</p>
           <Button variant="contained" startIcon={<Bolt />} onClick={() => onNavigate(critical || overdue ? "Pending Emails" : canSync ? "Mailboxes" : "Audit Logs")}>{critical || overdue ? text("dashboard.open_queue") : text("dashboard.review_setup")}</Button>
         </Card>
         <Card className="reference-attention">
@@ -2169,6 +2176,7 @@ export default function ProductionApp() {
       const paths: Record<string, string> = {
         Dashboard: "/dashboard/kpis",
         "Pending Emails": `/emails/pending?${pendingParams}`,
+        "Employee List": "/employees",
         "Employee Performance": `/employees/performance?sort_by=${performanceSort}&order=${performanceOrder}`,
         Reports: `/reports/${reportPeriod}?dimension=${reportDimension}`,
         Mailboxes: "/mailboxes",
@@ -2202,6 +2210,14 @@ export default function ProductionApp() {
         setAiReviewEnabled(!!aiStatus.enabled);
         setAiProviderConfigured(!!aiStatus.provider_configured);
         setAiSchedulerEnabled(!!aiStatus.scheduler_enabled);
+      } else if (section === "Employee List") {
+        const employeeList = await api(paths[section], token);
+        setData(employeeList);
+        setEmployees(employeeList);
+      } else if (section === "Employee Performance") {
+        const [performance, employeeList] = await Promise.all([api(paths[section], token), api("/employees", token)]);
+        setData(performance);
+        setEmployees(employeeList);
       } else if (section === "AI Settings") {
         const config = await api(paths[section], token);
         setAiConfig(config);
@@ -2370,6 +2386,12 @@ export default function ProductionApp() {
     : section === "Reports" && reportDimension === "employee" && aiReviewEmployeeId
       ? rows.filter((row) => String(row.employee_id) === aiReviewEmployeeId)
     : rows;
+  const employeeListRows = employees.filter((employee) => employee.active !== false && employee.email.trim().toLowerCase().endsWith("@indianinfotech.org")).map((employee, index) => ({
+    serial_number: index + 1,
+    id: employee.id,
+    name: employee.name?.trim() || employee.email.split("@")[0],
+    email: employee.email,
+  }));
   const departmentOptions = [...new Set([...departments, ...employees.map((employee) => employee.department || "General"), ...rows.map((row) => row.department || "General")])].sort();
   const departmentCount = (department: string) => rows.filter((row) => (row.department || "General") === department).length;
   const saveGmailCredentials = async (clientId: string, clientSecret: string) => {
@@ -2472,19 +2494,23 @@ export default function ProductionApp() {
       const body =
         createDialog === "employee"
           ? { name: person.name, email: person.email, department: person.department, active: person.active }
-          : editingPersonId && !person.password
-            ? { name: person.name, role: person.role, active: person.active }
-            : {
-                name: person.name,
-                email: person.email,
-                password: person.password,
-                role: person.role,
-                active: person.active,
-              };
+          : {
+              name: person.name,
+              email: person.email,
+              ...(editingPersonId && !person.password ? {} : { password: person.password }),
+              role: person.role,
+              active: person.active,
+            };
       const saved = await api(editingPersonId ? `${base}/${editingPersonId}` : base, token, {
         method: editingPersonId ? "PATCH" : "POST",
         body: JSON.stringify(body),
       });
+      if (saved.reauthenticate) {
+        setCreateDialog(null);
+        setToken("");
+        window.alert("Login updated. Sign in again with your new credentials.");
+        return;
+      }
       if (createDialog === "user" && person.role === "manager") {
         await api(`/users/${editingPersonId || saved.id}/mailbox-access`, token, {
           method: "PUT",
@@ -2505,7 +2531,7 @@ export default function ProductionApp() {
       const [m, e] = await Promise.all([api("/mailboxes", token), api("/employees", token)]);
       setMailboxes(m);
       setEmployees(e);
-      if (createDialog === "employee") {
+      if (createDialog === "employee" && section === "Employee Performance") {
         const performance = await api(`/employees/performance?sort_by=${performanceSort}&order=${performanceOrder}`, token);
         setData(performance);
         setDepartmentFilter(person.department);
@@ -2881,7 +2907,7 @@ export default function ProductionApp() {
       const saved = await api("/settings/ai-provider", token, { method: "PATCH", body: JSON.stringify({ provider: aiConfig.provider, model: aiConfig.model, api_key: aiKey || null }) });
       setAiConfig(saved);
       setAiKey("");
-      setNotice("AI provider and model saved. New AI requests use this selection.");
+      setNotice(saved.reviews_queued ? `AI provider and model saved. ${saved.reviews_queued} failed review${saved.reviews_queued === 1 ? "" : "s"} queued for retry.` : "AI provider and model saved. New AI requests use this selection.");
     } catch (e) { setError(e instanceof Error ? e.message : "AI settings could not be saved"); }
     finally { setSavingAiConfig(false); }
   };
@@ -3037,7 +3063,7 @@ export default function ProductionApp() {
               const selectedDay = employeeHistory.find((day) => day.date === employeeSelectedDate) ?? {
                 date: employeeSelectedDate, received: 0, replied: 0, pending: 0, ignored: 0,
               };
-              const periodTotals = ["received", "replied", "pending", "ignored"].map((key) => ({ key, value: employeeHistory.reduce((total, day) => total + Number(day[key] || 0), 0) }));
+              const periodTotals = ["received", "replied", "replied_by_other", "pending", "ignored"].map((key) => ({ key, value: employeeHistory.reduce((total, day) => total + Number(day[key] || 0), 0) }));
               const periodLabel = employeePeriod === "rolling" ? "Last 365 days" : employeePeriod;
               return <>
             <Box className="employee-calendar-layout">
@@ -3079,8 +3105,8 @@ export default function ProductionApp() {
               <Box className="employee-period-summary employee-summary-card">
                 <Box className="employee-summary-heading"><Typography variant="overline">PERIOD TOTALS</Typography><Typography variant="subtitle2">{periodLabel}</Typography></Box>
                 <Box className="employee-summary-content">
-                  <Box className="employee-period-total-list">{periodTotals.map(({ key, value }) => <Box className={`employee-period-total ${key}`} key={key}><Typography variant="caption">{key}</Typography><Typography variant="h5">{value.toLocaleString()}</Typography></Box>)}</Box>
-                  <Box className="employee-summary-pie employee-period-pie"><Doughnut data={{ labels: ["Received", "Replied", "Pending", "Ignored"], datasets: [{ data: periodTotals.map(({ value }) => value), backgroundColor: ["#3478f6", "#16885f", "#e4a323", "#94a3b8"], borderWidth: 0 }] }} options={{ responsive: true, maintainAspectRatio: false, cutout: "62%", animation: { duration: 900, animateRotate: true, animateScale: true }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `${context.label}: ${Number(context.raw).toLocaleString()}` } } } }} />{periodTotals.reduce((sum, item) => sum + item.value, 0) > 0 && <Typography variant="caption" className="employee-pie-center">{periodTotals.reduce((sum, item) => sum + item.value, 0).toLocaleString()}<small>total</small></Typography>}</Box>
+                  <Box className="employee-period-total-list">{periodTotals.map(({ key, value }) => <Box className={`employee-period-total ${key}`} key={key}><Typography variant="caption">{key === "replied_by_other" ? "Replied by someone else" : key}</Typography><Typography variant="h5">{value.toLocaleString()}</Typography></Box>)}</Box>
+                  <Box className="employee-summary-pie employee-period-pie"><Doughnut data={{ labels: ["Received", "Replied", "Replied by someone else", "Pending", "Ignored"], datasets: [{ data: periodTotals.map(({ value }) => value), backgroundColor: ["#3478f6", "#16885f", "#64748b", "#e4a323", "#94a3b8"], borderWidth: 0 }] }} options={{ responsive: true, maintainAspectRatio: false, cutout: "62%", animation: { duration: 900, animateRotate: true, animateScale: true }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `${context.label}: ${Number(context.raw).toLocaleString()}` } } } }} />{periodTotals.reduce((sum, item) => sum + item.value, 0) > 0 && <Typography variant="caption" className="employee-pie-center">{periodTotals.reduce((sum, item) => sum + item.value, 0).toLocaleString()}<small>total</small></Typography>}</Box>
                 </Box>
               </Box>
             </Box>
@@ -3097,7 +3123,7 @@ export default function ProductionApp() {
               <Box className="employee-mail-list">
                 {employeeMailReport?.mails?.length ? employeeMailReport.mails.map((mail: any) => <Box className="employee-mail-row" key={mail.id}>
                   <Box className="employee-mail-main"><Typography variant="subtitle2" noWrap>{mail.subject}</Typography><Typography variant="caption" noWrap>{mail.sender} · {mail.received_at ? new Date(mail.received_at).toLocaleString() : "—"}</Typography></Box>
-                  <Chip size="small" label={mail.status} color={mail.status === "replied" ? "success" : mail.status === "pending" ? "warning" : "default"} />
+                  <Chip size="small" label={mail.status_label || mail.status} color={mail.status === "replied" && mail.replied_by_you !== false ? "success" : mail.status === "pending" ? "warning" : "default"} />
                   <Box className="employee-mail-reason"><Typography variant="caption">Reason / evidence</Typography><Typography variant="body2">{mail.reason}</Typography></Box>
                 </Box>) : <Typography variant="body2" color="text.secondary">No received mail for this employee in the selected template period.</Typography>}
               </Box>
@@ -3155,7 +3181,7 @@ export default function ProductionApp() {
                 <Add sx={{ mr: 1 }} /> {text("action.add_mailbox")}
               </Button>
             )}
-            {role === "admin" && section === "Employee Performance" && (
+            {role === "admin" && ["Employee List", "Employee Performance"].includes(section) && (
               <Button
                 variant="contained"
                 color="info"
@@ -3478,7 +3504,18 @@ export default function ProductionApp() {
               )}
               {section !== "Settings" && section !== "AI Settings" && (
                 <>
-                  {section === "Employee Performance" ? (
+                  {section === "Employee List" ? (
+                    <Box>
+                      <Chip size="small" label={`${employeeListRows.length} active employees`} sx={{ mb: 2 }} />
+                      <DataTable
+                        rows={employeeListRows}
+                        emptyTitle={emptyTitle(section)}
+                        emptyDescription={emptyDescription(section)}
+                        onEdit={role === "admin" ? (row) => editPerson("employee", row) : undefined}
+                        onDelete={role === "admin" ? removeEmployee : undefined}
+                      />
+                    </Box>
+                  ) : section === "Employee Performance" ? (
                     <DataTable
                       rows={visibleRows}
                       emptyTitle={emptyTitle(section)}
@@ -3661,7 +3698,6 @@ export default function ProductionApp() {
             <TextField
               label={text("dialog.person.email")}
               type="email"
-              disabled={createDialog === "user" && !!editingPersonId}
               value={person.email}
               onChange={(e) => setPerson({ ...person, email: e.target.value })}
             />
@@ -3761,7 +3797,7 @@ export default function ProductionApp() {
                   <Typography variant="subtitle2">{review.subject}</Typography>
                   <Typography variant="caption" color="text.secondary">From {review.sender} · {formatMailboxDateTime(review.received_at)} · {review.mailbox}</Typography>
                   {review.analyzed_at && <Typography variant="caption" color="text.secondary">{review.status === "ready" ? "Reviewed" : "Last attempt"} {new Date(review.analyzed_at).toLocaleString()}</Typography>}
-                  {review.status === "ready" ? <VisualCoachingReview review={review} /> : <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{review.status === "failed" ? ["ai_provider_http_402", "ai_provider_http_429"].includes(review.error) ? "AI provider limit reached. Open AI Settings to choose another provider or model; review will retry automatically." : "Review temporarily unavailable. Automatic retry starts within a minute." : "Queued for background review after mailbox synchronization."}</Typography>}
+                  {review.status === "ready" ? <VisualCoachingReview review={review} /> : <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{review.status === "failed" ? review.error === "ai_provider_http_404" ? "The selected AI model is unavailable for this API key. Open AI Settings, choose an available model, and save to retry failed reviews." : ["ai_provider_http_402", "ai_provider_http_429"].includes(review.error) ? "AI provider limit reached. Open AI Settings to choose another provider or model; review will retry automatically." : "Review temporarily unavailable. Automatic retry starts within a minute." : "Queued for background review after mailbox synchronization."}</Typography>}
                 </Card>
               ))}
               {aiReviewResult.total_pages > 1 && <Pagination page={aiReviewResult.page} count={aiReviewResult.total_pages} onChange={(_, page) => { setAiReviewPage(page); void generateEmployeeAIReview(page); }} color="primary" />}

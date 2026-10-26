@@ -411,6 +411,8 @@ FRONTEND_DEFAULTS = {
     "dashboard.resolve_critical": "Resolve critical exposure",
     "dashboard.clear_overdue": "Clear overdue replies",
     "dashboard.verify_flow": "Verify mailbox flow",
+    "dashboard.review_workload": "Review mailbox workload",
+    "dashboard.review_workload_sentence": "Mailbox synchronization succeeded. Review the latest messages and ownership in the tracker.",
     "dashboard.critical_sentence": "{count} conversations need immediate management attention.",
     "dashboard.overdue_sentence": "{count} replies have crossed their SLA threshold.",
     "dashboard.verify_sentence": "Confirm a successful Microsoft 365 synchronization before relying on zero values.",
