@@ -4,6 +4,8 @@
 
 `main` is the stable MVP/release branch. Make daily changes on `testing` or on a feature branch created from `testing` (`git switch testing && git pull && git switch -c feature/my-change`). Push and test changes there. When a change is ready, open a pull request from `testing` into `main`, review the diff and checks, then merge. Do not commit routine feature work directly to `main`. After merging, update `testing` from `main` before starting the next change.
 
+See [FEATURE_ROADMAP.md](FEATURE_ROADMAP.md) for the phased plan covering F1–F22 and the checks required before release.
+
 Production-oriented single-tenant, multi-mailbox Microsoft 365 and Gmail SLA monitoring. The authoritative requirements are in `project.docx`.
 
 ## Stack
