@@ -485,9 +485,11 @@ def test_reassigning_replied_mail_does_not_transfer_credit(report_db):
     assert rows[1]["replied"] == 1 and rows[2]["replied_by_other"] == 1
 
 
-def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db):
+def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db,monkeypatch):
     from app.repositories.email import EmailRepository
     from app.services.sync import reconcile_replies
+    from app.services import authorization
+    monkeypatch.setattr(authorization,"mailbox_scope",lambda *_:[1])
     sessions, client = report_db
     start = Clock.now(timezone.utc)
     with sessions() as db:
@@ -508,8 +510,21 @@ def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db
         reconcile_replies(db, employees); db.commit()
         performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
         assert all(performance[id]["received"] == 2 and performance[id]["pending"] == 0 and performance[id]["replied"] == 1 and performance[id]["replied_by_other"] == 1 for id in (1, 2))
+        first_id = first.id
     report = client.get("/api/reports/monthly?dimension=employee").json()["rows"]
     assert all(row["total_received"] == 2 for row in report)
+    response = client.get(f"/api/emails/{first_id}/conversation")
+    assert response.status_code == 200, response.text
+    conversation = response.json()
+    assert (conversation["customer_message_count"], conversation["conversation_count"], conversation["completed_rounds"], conversation["pending_obligations"]) == (2, 1, 2, 0)
+    assert [row["responder_employee_id"] for row in conversation["messages"]] == [1, 2]
+    assert conversation["messages"][1]["handover_from"] == "Same Name"
+    assert [row["reply_hours"] for row in conversation["messages"]] == [0, 0]  # Both rounds occur outside business hours.
+    assert all(row["replied_at"] for row in conversation["messages"])
+    assert conversation["partial_grouping"] is True
+    with sessions() as db:
+        private_id=mail(db,"private-conversation",mailbox_id=2).id
+    assert client.get(f"/api/emails/{private_id}/conversation").status_code==404
 
 
 def test_recipient_migration_is_safe_on_current_schema(report_db):

@@ -2065,6 +2065,7 @@ export default function ProductionApp() {
     [mailboxes, setMailboxes] = useState<any[]>([]),
     [employees, setEmployees] = useState<any[]>([]),
     [selectedEmail, setSelectedEmail] = useState<any>(null),
+    [conversation, setConversation] = useState<any>(null),
     [selectedEmployee, setSelectedEmployee] = useState<any>(null),
     [aiReviewOpen, setAiReviewOpen] = useState(false),
     [aiReviewConsent, setAiReviewConsent] = useState(false),
@@ -2565,10 +2566,12 @@ export default function ProductionApp() {
   };
   const openEmail = async (row: any) => {
     try {
+      setConversation(null);
       const detail = await api(`/emails/${row.id}`, token);
       api(`/emails/${row.id}/read`, token, { method: "PATCH" }).catch(() => undefined);
       setReplyDraft("");
       setSelectedEmail({ ...detail, content_loading: role === "admin" });
+      api(`/emails/${row.id}/conversation`, token).then(setConversation).catch(() => setConversation({ source_id: row.id, error: "Conversation details are unavailable." }));
       if (role === "admin") {
         try {
           const body = await api(`/emails/${row.id}/content`, token);
@@ -3918,6 +3921,17 @@ export default function ProductionApp() {
                   {selectedEmail.conversation_id || text("detail.unavailable")}
                 </span>
               </Box>
+              {conversation?.source_id === selectedEmail.id && <Box sx={{ mt: 2, mb: 2 }}>
+                {conversation.error ? <Alert severity="warning">{conversation.error}</Alert> : <Card variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle1">Conversation · {conversation.customer_message_count} customer messages · {conversation.completed_rounds} completed rounds · {conversation.pending_obligations} pending obligations</Typography>
+                  {conversation.partial_grouping && <Alert severity="info" sx={{ mt: 1 }}>Partial grouping: {conversation.grouping_note}</Alert>}
+                  {conversation.messages.map((message: any, index: number) => <Box key={message.id} sx={{ mt: 1.5, pt: 1, borderTop: index ? "1px solid #e5e7eb" : "none" }}>
+                    <Typography variant="body2"><strong>Round {index + 1}:</strong> {message.subject} · {formatMailboxDateTime(message.received_at, selectedEmail.mailbox_timezone)}</Typography>
+                    <Typography variant="caption">To: {message.to_employees.join(", ") || "No tracked employee"} · {message.status === "replied" ? `Replied by ${message.responder || "unknown"} at ${formatMailboxDateTime(message.replied_at, selectedEmail.mailbox_timezone)} · ${Number(message.reply_hours || 0).toFixed(2)} business hours` : "Awaiting reply"}</Typography>
+                    {message.handover_from && <Typography variant="caption" display="block">Handover from {message.handover_from} to {message.responder}</Typography>}
+                  </Box>)}
+                </Card>}
+              </Box>}
               {role === "admin" && (
                 <Box className="email-content">
                   <Typography variant="subtitle2">{text("detail.message_content", "Message content")}</Typography>

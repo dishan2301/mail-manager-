@@ -297,6 +297,19 @@ def pending(page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),status_fi
 def email_detail(email_id:int,principal:dict=viewer,db:Session=Depends(get_db)):
     row=require_email_scope(db,principal,db.get(Email,email_id))
     return {"id":row.id,"message_id":row.message_id,"conversation_id":row.conversation_id,"internet_message_id":row.internet_message_id,"sender":row.sender,"receiver":row.receiver,"subject":row.subject,"received_time":_utc_timestamp(row.received_time),"sent_time":_utc_timestamp(row.sent_time),"mailbox_timezone":row.mailbox.timezone,"folder":row.folder,"categories":row.categories,"classification":row.classification,"status":row.status,"read_at":_utc_timestamp(row.read_at),"replied_at":_utc_timestamp(row.replied_at),"pending_hours":row.pending_hours,"sla_tier":row.sla_tier,"assigned_employee_id":row.assigned_employee_id,"responder_employee_id":row.responder_employee_id}
+@router.get("/emails/{email_id}/conversation",dependencies=[viewer])
+def email_conversation(email_id:int,principal:dict=viewer,db:Session=Depends(get_db)):
+    source=require_email_scope(db,principal,db.get(Email,email_id))
+    scope=[Email.mailbox_id==source.mailbox_id,Email.folder=="inbox",Email.classification==Classification.CUSTOMER,Email.status.in_([EmailStatus.PENDING,EmailStatus.REPLIED])]
+    scope.append(Email.conversation_id==source.conversation_id if source.conversation_id else Email.id==source.id)
+    rows=list(db.scalars(select(Email).options(joinedload(Email.employee),joinedload(Email.responder),selectinload(Email.recipients).joinedload(EmailRecipient.employee)).where(*scope).order_by(Email.received_time,Email.id)))
+    previous_responder=None;messages=[]
+    for row in rows:
+        responder=row.responder.name if row.responder else None
+        messages.append({"id":row.id,"sender":row.sender,"subject":row.subject,"received_at":_utc_timestamp(row.received_time),"to_employees":[recipient.employee.name for recipient in row.recipients],"status":row.status.value,"assigned_employee":row.employee.name if row.employee else None,"responder":responder,"responder_employee_id":row.responder_employee_id,"replied_at":_utc_timestamp(row.replied_at),"reply_hours":row.pending_hours if row.status==EmailStatus.REPLIED else None,"handover_from":previous_responder[1] if responder and previous_responder and row.responder_employee_id!=previous_responder[0] else None})
+        if responder:previous_responder=(row.responder_employee_id,responder)
+    multiple_mailboxes=(db.scalar(select(func.count(Mailbox.id))) or 0)>1
+    return {"source_id":source.id,"mailbox":source.mailbox.address,"conversation_id":source.conversation_id,"conversation_count":1,"customer_message_count":len(rows),"completed_rounds":sum(row.status==EmailStatus.REPLIED for row in rows),"pending_obligations":sum(len(row.recipients) or 1 for row in rows if row.status==EmailStatus.PENDING),"partial_grouping":not source.conversation_id or multiple_mailboxes,"grouping_note":"Mailbox-local conversation; other connected mailboxes may hold additional copies or rounds." if multiple_mailboxes else "Provider conversation ID is unavailable; only this message is shown." if not source.conversation_id else None,"messages":messages}
 @router.patch("/emails/{email_id}/read",dependencies=[admin])
 def mark_email_read(email_id:int,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     row=require_email_scope(db,principal,db.get(Email,email_id))
