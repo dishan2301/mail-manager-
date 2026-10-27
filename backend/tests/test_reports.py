@@ -535,6 +535,11 @@ def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db
         first_id = first.id
     report = client.get("/api/reports/monthly?dimension=employee").json()["rows"]
     assert all(row["total_received"] == 2 for row in report)
+    with sessions() as db:
+        mail(db,"other-thread",start+timedelta(minutes=40),conversation_id="unrelated",internet_message_id="<other-thread>")
+        mail(db,"orphan-other-thread",start+timedelta(minutes=50),sender="two@indianinfotech.org",receiver="customer@example.com",subject="Re: Request",conversation_id="different-thread",internet_message_id="<orphan-other-thread>")
+        mail(db,"duplicate-round-one",start,mailbox_id=2,receiver="one@indianinfotech.org, two@indianinfotech.org",conversation_id="meeting",internet_message_id="<round-one>")
+        reconcile_replies(db,list(db.scalars(select(Employee))));db.commit()
     response = client.get(f"/api/emails/{first_id}/conversation")
     assert response.status_code == 200, response.text
     conversation = response.json()

@@ -133,7 +133,8 @@ def reconcile_replies(db,employees):
         recipients_by_email.setdefault(recipient.email_id,[]).append(recipient)
     for copies in groups.values():
         direct=[row for row in copies if mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")}]
-        primary=(direct or copies)[0]
+        tracked=[row for row in copies if row.status in {EmailStatus.PENDING,EmailStatus.REPLIED}]
+        primary=(tracked or direct or copies)[0]
         owner_id=primary.assigned_employee_id if primary.assignment_overridden or primary.status==EmailStatus.REPLIED else None
         manual_reply=rows_by_id.get(primary.reply_email_id) if primary.reply_link_source=="manual" else None
         source=MessageRef(primary.internet_message_id,primary.conversation_id,primary.subject,primary.received_time)
