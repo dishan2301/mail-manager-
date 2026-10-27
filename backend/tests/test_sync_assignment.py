@@ -88,6 +88,7 @@ def test_cc_observers_do_not_owe_replies_and_actual_responder_gets_credit():
         assert copies[0].assigned_employee_id==y.id
         assert copies[0].responder_employee_id==a.id
         assert copies[0].replied_at==reply.received_time
+        assert copies[0].reply_email_id==reply.id and copies[0].reply_link_source=="automatic"
         assert reply.status==EmailStatus.OBSERVER_COPY
         performance={row["id"]:row for row in EmailRepository(db).employee_performance()}
         assert performance[a.id]["replied"]==1

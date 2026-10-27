@@ -21,6 +21,7 @@ There is no fixed calendar promise. Advance when each phase's acceptance checks 
 - Remaining Phase 1 release gate: validate F5 with a controlled AI account and F1/F2 with a controlled mailbox in the test deployment, compare counts, and review before merging to `main`.
 - Phase 2 F6: responder identity is stored separately from assignment. Manual reassignment preserves credit and `replied_at`; a reversible `0019` backfill matched all 44 historical replied rows and per-employee credit counts in an isolated local rehearsal. See [F6_MIGRATION.md](F6_MIGRATION.md). Test deployment validation remains before release.
 - Phase 2 F3: the mail detail drawer now shows a read-only mailbox-local conversation timeline with customer-message and completed-round counts, To recipients, responder, handovers, pending obligations, and per-round business-hours timing. A partial-grouping warning appears where cross-mailbox linkage is uncertain. Controlled-mailbox validation remains before release.
+- Phase 2 F13: admins can inspect unmatched reply candidates with header, conversation, or subject evidence from a pending message and manually link one. The audited link survives reconciliation and updates responder credit and reports. Reversible `0020` migration and local count comparison are in [F13_MIGRATION.md](F13_MIGRATION.md). Controlled-mailbox validation remains before release.
 
 ## Phase 0 — Baseline and metric definitions
 

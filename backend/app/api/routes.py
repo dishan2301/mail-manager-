@@ -1,4 +1,5 @@
 from datetime import date,datetime,time as dt_time,timedelta,timezone
+import re
 import asyncio
 import csv
 import hashlib
@@ -36,6 +37,7 @@ from app.services.notifications import report_mailbox_available
 from app.services.sla import Calendar,elapsed_hours,tier_for
 from app.services.scheduler import apply_sync_settings,build_scheduler
 from app.services.sync_health import mailbox_freshness
+from app.services.sync import reconcile_replies
 from io import BytesIO,StringIO
 from openpyxl import Workbook
 from reportlab.lib.pagesizes import A4
@@ -310,6 +312,37 @@ def email_conversation(email_id:int,principal:dict=viewer,db:Session=Depends(get
         if responder:previous_responder=(row.responder_employee_id,responder)
     multiple_mailboxes=(db.scalar(select(func.count(Mailbox.id))) or 0)>1
     return {"source_id":source.id,"mailbox":source.mailbox.address,"conversation_id":source.conversation_id,"conversation_count":1,"customer_message_count":len(rows),"completed_rounds":sum(row.status==EmailStatus.REPLIED for row in rows),"pending_obligations":sum(len(row.recipients) or 1 for row in rows if row.status==EmailStatus.PENDING),"partial_grouping":not source.conversation_id or multiple_mailboxes,"grouping_note":"Mailbox-local conversation; other connected mailboxes may hold additional copies or rounds." if multiple_mailboxes else "Provider conversation ID is unavailable; only this message is shown." if not source.conversation_id else None,"messages":messages}
+def _reply_candidates(db:Session,original:Email):
+    employees={row.email.strip().casefold() for row in db.scalars(select(Employee).where(Employee.active.is_(True)))}
+    linked=set(db.scalars(select(Email.reply_email_id).where(Email.reply_email_id.is_not(None))))
+    rows=db.scalars(select(Email).where(Email.id!=original.id,Email.folder.in_(["inbox","sentitems"]),Email.classification==Classification.CUSTOMER,Email.received_time>=original.received_time,Email.received_time<=original.received_time+timedelta(days=30)).order_by(Email.received_time.desc()).limit(500))
+    subject=lambda value:re.sub(r"^(?:(?:re|fw|fwd):\s*)+","",(value or "").strip(),flags=re.I).casefold()
+    result=[]
+    for reply in rows:
+        if reply.id in linked or reply.sender.strip().casefold() not in employees or reply.status in {EmailStatus.PENDING,EmailStatus.REPLIED}:continue
+        evidence=[]
+        if original.internet_message_id and (original.internet_message_id.strip()==(reply.in_reply_to or "").strip() or original.internet_message_id.strip() in (reply.references or "").split()):evidence.append("reply header")
+        if original.mailbox_id==reply.mailbox_id and original.conversation_id and original.conversation_id==reply.conversation_id:evidence.append("same mailbox conversation")
+        if subject(original.subject)==subject(reply.subject):evidence.append("same subject within 30 days")
+        if evidence:result.append({"reply_id":reply.id,"sender":reply.sender,"subject":reply.subject,"sent_at":_utc_timestamp(reply.sent_time or reply.received_time),"mailbox":reply.mailbox.address,"evidence":evidence})
+        if len(result)>=50:break
+    return result
+@router.get("/emails/{email_id}/reply-candidates",dependencies=[admin])
+def reply_candidates(email_id:int,principal:dict=admin,db:Session=Depends(get_db)):
+    original=require_email_scope(db,principal,db.get(Email,email_id))
+    if original.folder!="inbox" or original.classification!=Classification.CUSTOMER:raise HTTPException(422,"Choose a customer inbox message")
+    return {"original_id":original.id,"candidates":_reply_candidates(db,original)}
+@router.post("/emails/{email_id}/link-reply",dependencies=[admin])
+def link_reply(email_id:int,payload:dict,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
+    original=require_email_scope(db,principal,db.get(Email,email_id))
+    reply_id=payload.get("reply_id")
+    if original.status!=EmailStatus.PENDING or not isinstance(reply_id,int) or isinstance(reply_id,bool):raise HTTPException(422,"Choose a pending customer message and a reply candidate")
+    if reply_id not in {row["reply_id"] for row in _reply_candidates(db,original)}:raise HTTPException(422,"Reply is not an unmatched candidate for this message")
+    original.reply_email_id=reply_id;original.reply_link_source="manual"
+    reconcile_replies(db,[])
+    audit(db,request,"email.reply.manual_link","success",principal["user_id"],"email",email_id,{"original_id":email_id,"reply_id":reply_id})
+    db.commit()
+    return {"original_id":original.id,"reply_id":reply_id,"status":original.status.value,"responder_employee_id":original.responder_employee_id,"replied_at":_utc_timestamp(original.replied_at)}
 @router.patch("/emails/{email_id}/read",dependencies=[admin])
 def mark_email_read(email_id:int,request:Request,principal:dict=admin,db:Session=Depends(get_db)):
     row=require_email_scope(db,principal,db.get(Email,email_id))

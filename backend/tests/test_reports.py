@@ -485,6 +485,28 @@ def test_reassigning_replied_mail_does_not_transfer_credit(report_db):
     assert rows[1]["replied"] == 1 and rows[2]["replied_by_other"] == 1
 
 
+def test_manual_reply_link_uses_evidence_and_recalculates_credit(report_db,monkeypatch):
+    from app.services.sync import reconcile_replies
+    sessions,client=report_db
+    events=[]
+    monkeypatch.setattr(routes,"audit",lambda _db,_request,action,_outcome,_actor,_kind,_id,details:events.append((action,details)))
+    with sessions() as db:
+        original=mail(db,"unmatched-original",receiver="one@indianinfotech.org",conversation_id="original-thread")
+        reply=mail(db,"unmatched-reply",Clock.now(timezone.utc)+timedelta(minutes=10),sender="two@indianinfotech.org",receiver="customer@example.com",subject="Re: Request",conversation_id="other-thread",status=EmailStatus.OBSERVER_COPY,assigned_employee_id=None)
+        candidate=routes.reply_candidates(original.id,principal={"role":"admin","user_id":1},db=db)["candidates"]
+        assert [row["reply_id"] for row in candidate]==[reply.id]
+        assert candidate[0]["evidence"]==["same subject within 30 days"]
+        result=routes.link_reply(original.id,{"reply_id":reply.id},SimpleNamespace(state=SimpleNamespace()),principal={"role":"admin","user_id":1},db=db)
+        assert result["status"]=="replied" and result["responder_employee_id"]==2
+        assert events==[("email.reply.manual_link",{"original_id":original.id,"reply_id":reply.id})]
+        assert routes.reply_candidates(original.id,principal={"role":"admin","user_id":1},db=db)["candidates"]==[]
+        reconcile_replies(db,[]);db.commit()
+        db.refresh(original)
+        assert original.reply_email_id==reply.id and original.reply_link_source=="manual"
+    performance={row["id"]:row for row in client.get("/api/employees/performance").json()}
+    assert performance[2]["replied"]==1 and performance[1]["replied"]==0
+
+
 def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db,monkeypatch):
     from app.repositories.email import EmailRepository
     from app.services.sync import reconcile_replies

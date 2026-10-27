@@ -2066,6 +2066,7 @@ export default function ProductionApp() {
     [employees, setEmployees] = useState<any[]>([]),
     [selectedEmail, setSelectedEmail] = useState<any>(null),
     [conversation, setConversation] = useState<any>(null),
+    [replyCandidates, setReplyCandidates] = useState<any[] | null>(null),
     [selectedEmployee, setSelectedEmployee] = useState<any>(null),
     [aiReviewOpen, setAiReviewOpen] = useState(false),
     [aiReviewConsent, setAiReviewConsent] = useState(false),
@@ -2567,6 +2568,7 @@ export default function ProductionApp() {
   const openEmail = async (row: any) => {
     try {
       setConversation(null);
+      setReplyCandidates(null);
       const detail = await api(`/emails/${row.id}`, token);
       api(`/emails/${row.id}/read`, token, { method: "PATCH" }).catch(() => undefined);
       setReplyDraft("");
@@ -2583,6 +2585,20 @@ export default function ProductionApp() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load email");
     }
+  };
+  const findReplyCandidates = async () => {
+    if (!selectedEmail) return;
+    try { const result=await api(`/emails/${selectedEmail.id}/reply-candidates`,token);setReplyCandidates(result.candidates || []); }
+    catch (e) { setError(e instanceof Error ? e.message : "Unable to inspect reply candidates"); }
+  };
+  const linkReplyCandidate = async (replyId:number) => {
+    if (!selectedEmail) return;
+    try {
+      await api(`/emails/${selectedEmail.id}/link-reply`,token,{method:"POST",body:JSON.stringify({reply_id:replyId})});
+      setNotice("Reply linked. Response credit and reports updated.");
+      await openEmail({id:selectedEmail.id});
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to link reply"); }
   };
   const assistReply = async (mode: "draft" | "correct" | "rewrite") => {
     if (!selectedEmail) return;
@@ -3929,6 +3945,18 @@ export default function ProductionApp() {
                     <Typography variant="body2"><strong>Round {index + 1}:</strong> {message.subject} · {formatMailboxDateTime(message.received_at, selectedEmail.mailbox_timezone)}</Typography>
                     <Typography variant="caption">To: {message.to_employees.join(", ") || "No tracked employee"} · {message.status === "replied" ? `Replied by ${message.responder || "unknown"} at ${formatMailboxDateTime(message.replied_at, selectedEmail.mailbox_timezone)} · ${Number(message.reply_hours || 0).toFixed(2)} business hours` : "Awaiting reply"}</Typography>
                     {message.handover_from && <Typography variant="caption" display="block">Handover from {message.handover_from} to {message.responder}</Typography>}
+                  </Box>)}
+                </Card>}
+              </Box>}
+              {role === "admin" && selectedEmail.status === "pending" && <Box sx={{ mb: 2 }}>
+                <Button size="small" onClick={findReplyCandidates}>Find unmatched reply candidates</Button>
+                {replyCandidates && <Card variant="outlined" sx={{ p: 2, mt: 1 }}>
+                  <Typography variant="subtitle2">Unmatched reply candidates · {replyCandidates.length}</Typography>
+                  {replyCandidates.length === 0 && <Typography variant="body2">No candidate with matching headers, conversation, or subject was found in the last 30 days.</Typography>}
+                  {replyCandidates.map((candidate) => <Box key={candidate.reply_id} sx={{ mt: 1, borderTop: "1px solid #e5e7eb", pt: 1 }}>
+                    <Typography variant="body2">{candidate.sender} · {candidate.subject}</Typography>
+                    <Typography variant="caption" display="block">{formatMailboxDateTime(candidate.sent_at, selectedEmail.mailbox_timezone)} · Evidence: {candidate.evidence.join(", ")}</Typography>
+                    <Button size="small" onClick={() => linkReplyCandidate(candidate.reply_id)}>Link this reply</Button>
                   </Box>)}
                 </Card>}
               </Box>}
