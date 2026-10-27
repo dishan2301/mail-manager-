@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     ai_fallback_model: str = "gpt-4o-mini"
     frontend_url: str = "http://localhost:5173"
     sync_interval_seconds: int = 10
+    sync_stale_after_seconds: int = 900
     scheduler_enabled: bool = True
     summary_hour: int
     app_timezone: str = "Asia/Kolkata"

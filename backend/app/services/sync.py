@@ -78,6 +78,7 @@ async def sync_all_mailboxes():
                     folder=item.get("_folder","unknown");sent_at=datetime.fromisoformat(item["sentDateTime"].replace("Z","+00:00")) if item.get("sentDateTime") else None
                     values={"conversation_id":_text(item.get("conversationId"),512) or None,"internet_message_id":_text(item.get("internetMessageId"),998) or None,"in_reply_to":_text(headers.get("in-reply-to"),998) or None,"references":_text(headers.get("references"),8000) or None,"thread_index":_text(item.get("conversationIndex"),8000) or None,"sender":sender,"receiver":_recipients(item,mailbox.address),"subject":_text(item.get("subject") or "(no subject)",4000),"received_time":received,"sent_time":sent_at,"folder":_text(folder,80),"categories":[_text(value,200) for value in item.get("categories",[])[:100]],"classification":classification,"status":EmailStatus.PENDING if folder=="inbox" and classification.value=="Customer" else EmailStatus.IGNORED,"pending_hours":pending,"sla_tier":tier}
                     if existing:
+                        if existing.manually_ignored:values["status"]=EmailStatus.IGNORED
                         for key,value in values.items():setattr(existing,key,value)
                         if folder=="inbox" and existing.assigned_employee_id is None:
                             existing.assigned_employee_id=_assignee(values["receiver"],mailbox.address,employees)
@@ -107,6 +108,7 @@ def reconcile_replies(db,employees):
     """To recipients owe replies; the actual responding employee earns credit."""
     mailboxes={row.id:row for row in db.scalars(select(Mailbox))}
     rows=list(db.scalars(select(Email).order_by(Email.received_time,Email.id)))
+    rows_by_id={row.id:row for row in rows}
     # Backfill To recipients from already saved messages, even on an empty delta sync.
     employees=_discover_to_employees(db,getaddresses([row.receiver.replace(";",",") for row in rows if row.folder=="inbox"]))
     employees_by_address={row.email.strip().casefold():row.id for row in employees if row.active}
@@ -131,7 +133,10 @@ def reconcile_replies(db,employees):
         recipients_by_email.setdefault(recipient.email_id,[]).append(recipient)
     for copies in groups.values():
         direct=[row for row in copies if mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")}]
-        primary=(direct or copies)[0]
+        tracked=[row for row in copies if row.status in {EmailStatus.PENDING,EmailStatus.REPLIED}]
+        primary=(tracked or direct or copies)[0]
+        owner_id=primary.assigned_employee_id if primary.assignment_overridden or primary.status==EmailStatus.REPLIED else None
+        manual_reply=rows_by_id.get(primary.reply_email_id) if primary.reply_link_source=="manual" else None
         source=MessageRef(primary.internet_message_id,primary.conversation_id,primary.subject,primary.received_time)
         matches=[]
         copy_ids={row.id for row in copies}
@@ -145,17 +150,24 @@ def reconcile_replies(db,employees):
             source=MessageRef(local_source.internet_message_id,local_source.conversation_id,local_source.subject,local_source.received_time)
             candidate=MessageRef(reply.internet_message_id,reply.conversation_id if reply.mailbox_id==local_source.mailbox_id else None,reply.subject,reply.sent_time or reply.received_time,reply.in_reply_to,reply.references)
             if _utc(candidate.timestamp)>=_utc(source.timestamp) and is_reply(source,candidate):matches.append(reply)
-        match=min(matches,key=lambda row:_utc(row.sent_time or row.received_time)) if matches else None
+        match=manual_reply if manual_reply and manual_reply.sender.strip().casefold() in employees_by_address and _utc(manual_reply.sent_time or manual_reply.received_time)>=_utc(primary.received_time) else min(matches,key=lambda row:_utc(row.sent_time or row.received_time)) if matches else None
+        if match and match not in matches:matches.append(match)
         for response in matches:
             response_ids.add((response.internet_message_id or "").strip().casefold() or (response.mailbox_id,response.message_id))
         for row in copies:
             for recipient in recipients_by_email.get(row.id,[]):db.delete(recipient)
-            row.status=EmailStatus.IGNORED;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+            row.status=(EmailStatus.IGNORED if row.manually_ignored else EmailStatus.DUPLICATE_COPY if row is not primary and mailboxes[row.mailbox_id].address.strip().casefold() in {address.strip().casefold() for address in row.receiver.replace(";",",").split(",")} else EmailStatus.OBSERVER_COPY if row.classification.value=="Customer" else EmailStatus.IGNORED)
+            row.assigned_employee_id=None;row.responder_employee_id=None;row.replied_at=None;row.pending_hours=0
+            if row is not primary:row.reply_email_id=None;row.reply_link_source=None
+        if primary.manually_ignored:continue
         if _assignee(primary.receiver,"",employees) is None and match is None:continue
         to_ids={employees_by_address[address.strip().casefold()] for address in primary.receiver.replace(";",",").split(",") if address.strip().casefold() in employees_by_address}
         for employee_id in to_ids:db.add(EmailRecipient(email_id=primary.id,employee_id=employee_id))
         primary.status=EmailStatus.REPLIED if match else EmailStatus.PENDING
-        primary.assigned_employee_id=employees_by_address[match.sender.strip().casefold()] if match else _assignee(primary.receiver,mailboxes[primary.mailbox_id].address,employees)
+        primary.assigned_employee_id=owner_id if primary.assignment_overridden else owner_id or _assignee(primary.receiver,mailboxes[primary.mailbox_id].address,employees)
+        primary.responder_employee_id=employees_by_address[match.sender.strip().casefold()] if match else None
+        primary.reply_email_id=match.id if match else None
+        primary.reply_link_source=("manual" if manual_reply is match else "automatic") if match else None
         primary.replied_at=(match.sent_time or match.received_time) if match else None
         mailbox=mailboxes[primary.mailbox_id];saved=calendars.get(mailbox.id) or calendars.get(None)
         calendar=Calendar(timezone=mailbox.timezone,start=time.fromisoformat(saved.workday_start) if saved else time(9),end=time.fromisoformat(saved.workday_end) if saved else time(18),weekdays=tuple(saved.weekdays) if saved else (0,1,2,3,4),holidays=frozenset(date.fromisoformat(value) for value in saved.holidays) if saved else frozenset())
@@ -166,7 +178,7 @@ def reconcile_replies(db,employees):
         identity=(row.internet_message_id or "").strip().casefold() or (row.mailbox_id,row.message_id)
         if row.folder=="inbox" and identity in response_ids:
             for recipient in list(db.scalars(select(EmailRecipient).where(EmailRecipient.email_id==row.id))):db.delete(recipient)
-            row.status=EmailStatus.IGNORED;row.assigned_employee_id=None;row.replied_at=None;row.pending_hours=0
+            row.status=EmailStatus.IGNORED if row.manually_ignored else EmailStatus.OBSERVER_COPY;row.assigned_employee_id=None;row.responder_employee_id=None;row.replied_at=None;row.pending_hours=0;row.reply_email_id=None;row.reply_link_source=None
 
 
 def _utc(value):

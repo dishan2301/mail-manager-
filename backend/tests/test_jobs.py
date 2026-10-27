@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -7,7 +7,7 @@ from sqlalchemy import create_engine,func,select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models.entities import Classification,Email,EmailStatus,EscalationEvent,Mailbox,SLATier
+from app.models.entities import Classification,Email,EmailStatus,EscalationEvent,Mailbox,SLATier,SyncLog,User,Role
 from app.services import jobs
 
 
@@ -28,6 +28,26 @@ def test_escalation_delivery_is_recorded_once_per_threshold(monkeypatch):
     with sessions() as db:
         count=db.scalar(select(func.count()).select_from(EscalationEvent).where(EscalationEvent.email_id==email_id))
         assert count==2
+    engine.dispose()
+
+
+def test_stale_mailbox_alert_is_sent_once_until_next_success(monkeypatch):
+    engine=create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions=sessionmaker(bind=engine)
+    monkeypatch.setattr(jobs,"SessionLocal",sessions)
+    sent=[]
+    monkeypatch.setattr(jobs,"send_html",lambda address,subject,body: sent.append((address,subject,body)) or True)
+    monkeypatch.setattr(jobs,"get_settings",lambda:SimpleNamespace(sync_stale_after_seconds=900))
+    with sessions() as db:
+        db.add(User(name="Admin",email="admin@example.com",password_hash="test",role=Role.ADMIN,active=True))
+        db.add(Mailbox(address="stale@example.com",display_name="Stale",last_synced_at=datetime.now(timezone.utc)-timedelta(hours=2)))
+        db.commit()
+    jobs.process_sync_health_alerts();jobs.process_sync_health_alerts()
+    with sessions() as db:
+        alerts=list(db.scalars(select(SyncLog).where(SyncLog.action=="sync_stale_alert")))
+    assert len(sent)==len(alerts)==1
+    assert "stale@example.com" in sent[0][2]
     engine.dispose()
 
 

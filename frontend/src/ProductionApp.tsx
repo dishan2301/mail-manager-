@@ -183,6 +183,8 @@ function replyStatusLabel(value: unknown) {
   if (status === "pending") return "Not Replied";
   if (status === "replied") return "Replied";
   if (status === "ignored") return "Ignored";
+  if (status === "observer_copy") return "Observer copy";
+  if (status === "duplicate_copy") return "Duplicate copy";
   return String(value ?? "");
 }
 function formatMailboxDateTime(value: unknown, timeZone?: string) {
@@ -693,6 +695,8 @@ function MailKanban({ rows, onSelect }: { rows: any[]; onSelect: (row: any) => v
     ["pending", "Awaiting reply"],
     ["replied", "Replied"],
     ["ignored", "Ignored"],
+    ["observer_copy", "Observer copy"],
+    ["duplicate_copy", "Duplicate copy"],
   ] as const;
   return <Box className="mail-kanban">{columns.map(([status, label]) => {
     const items = rows.filter((row) => String(row.status).toLowerCase() === status);
@@ -710,9 +714,17 @@ type Readiness = {
   healthy_mailboxes: number;
   error_mailboxes: number;
   warning_mailboxes: number;
+  stale_mailboxes: number;
+  stale_after_seconds: number;
+  mailbox_health: {id:number;address:string;last_successful_sync:string|null;stale:boolean;never_synced:boolean;sync_error:boolean}[];
   paused_mailboxes: number;
   last_successful_sync: string | null;
 };
+function SyncFreshnessAlert({ readiness }: { readiness: Readiness | null }) {
+  const affected = readiness?.mailbox_health?.filter((row) => row.stale || row.never_synced) || [];
+  if (!affected.length) return null;
+  return <Alert severity="warning" sx={{ mb: 2 }}>Mailbox data may be incomplete: {affected.map((row) => `${row.address} (${row.never_synced ? "never synced" : `last successful sync ${new Date(row.last_successful_sync!).toLocaleString()}`})`).join("; ")}. Please check Mailboxes and run Sync.</Alert>;
+}
 type GraphSetup = {
   graph_configured: boolean;
   missing: string[];
@@ -1137,6 +1149,8 @@ function ProductionDashboard({
               label: format("dashboard.mailbox_error", { count: readiness.error_mailboxes }),
               color: "error" as const,
             }
+          : readiness.stale_mailboxes > 0
+            ? { message: "Mailbox sync is stale; dashboard counts may be incomplete", label: `${readiness.stale_mailboxes} stale mailbox${readiness.stale_mailboxes === 1 ? "" : "es"}`, color: "warning" as const }
           : readiness.warning_mailboxes > 0
             ? {
                 message: "Mailbox sync temporarily unavailable - last good dashboard data still shown",
@@ -1208,6 +1222,7 @@ function ProductionDashboard({
   const completed = activation.filter((item) => item.complete).length;
   return (
     <Box className="dashboard-stage" aria-label={text("dashboard.live_aria")}>
+      <SyncFreshnessAlert readiness={readiness} />
       <Box
         className={`executive-strip readiness-${integration.color}`}
         data-tour="readiness"
@@ -1483,6 +1498,8 @@ function ReferenceDashboard({
         ? { message: text("dashboard.integration.mailbox_missing.message"), label: text("dashboard.integration.mailbox_missing.label"), color: "warning" as const }
         : readiness.error_mailboxes > 0
           ? { message: text("dashboard.integration.sync_failed.message"), label: format("dashboard.mailbox_error", { count: readiness.error_mailboxes }), color: "error" as const }
+          : readiness.stale_mailboxes > 0
+            ? { message: "Mailbox sync is stale; dashboard counts may be incomplete", label: `${readiness.stale_mailboxes} stale mailbox${readiness.stale_mailboxes === 1 ? "" : "es"}`, color: "warning" as const }
           : readiness.warning_mailboxes > 0
             ? { message: "Mailbox sync temporarily unavailable - last good dashboard data still shown", label: `${readiness.warning_mailboxes} mailbox warning`, color: "warning" as const }
           : !readiness.last_successful_sync
@@ -1521,6 +1538,7 @@ function ReferenceDashboard({
   const allInboxReplyRate = allInboxTotal ? Math.round((allInboxReplied / allInboxTotal) * 100) : 0;
   return (
     <Box className="reference-dashboard" aria-label={text("dashboard.live_aria")}>
+      <SyncFreshnessAlert readiness={readiness} />
       <Box className={`reference-posture posture-${integration.color}`} data-tour="readiness">
         <Box><span>{text("dashboard.live_posture")}</span><b>{integration.message}</b></Box>
         <Chip color={integration.color} label={integration.label} />
@@ -1557,7 +1575,7 @@ function ReferenceDashboard({
           <Box className="reference-card-head"><Box><span>ALL TIME · ALL MAILBOXES</span><b>Overall reply rate</b></Box></Box>
           <Box className="reference-gauge" style={{ "--progress": `${(allInboxReplyRate / 100) * 180}deg` } as React.CSSProperties}><Box><strong>{allInboxReplyRate}%</strong><small>reply rate</small></Box></Box>
           <Box className="reference-legend"><span><i />{allInboxReplied} replied</span><span><i />{allInboxTotal} received</span></Box>
-          <small className="reply-rate-caption">{allInboxReplied} replied out of {allInboxTotal} incoming emails across accessible mailboxes; ignored mail is excluded.</small>
+          <small className="reply-rate-caption">{allInboxReplied} replied out of {allInboxTotal} customer messages requiring a reply across accessible mailboxes; ignored, observer, and duplicate copies are excluded.</small>
         </Card>
         <Card className="reference-sync">
           <Box className="sync-rings" aria-hidden="true" />
@@ -1569,7 +1587,7 @@ function ReferenceDashboard({
         <Card className="reference-mail-tracker">
           <Box className="reference-card-head"><Box><span>MAIL TRACKER</span><b>Ownership & response flow</b></Box><Button size="small" onClick={() => onNavigate("Employee Performance")}>Details</Button></Box>
           <Box className="tracker-statuses">
-            {[{ label: "Incoming", value: Number(data.today_emails || 0), tone: "in" }, { label: "Awaiting reply", value: pending, tone: "pending" }, { label: "Replied", value: resolved, tone: "resolved" }, { label: "Ignored", value: Number(data.ignored_emails || 0), tone: "ignored" }].map((item) => <Box className="tracker-status" title={`${item.label}: ${item.value}`} key={item.label}><i className={item.tone} /><strong>{item.value}</strong><small>{item.label}</small></Box>)}
+            {[{ label: "Incoming", value: Number(data.today_emails || 0), tone: "in" }, { label: "Awaiting reply", value: pending, tone: "pending" }, { label: "Replied", value: resolved, tone: "resolved" }, { label: "Ignored", value: Number(data.ignored_emails || 0), tone: "ignored" }, { label: "Observer copies", value: Number(data.observer_copies || 0), tone: "ignored" }, { label: "Duplicate copies", value: Number(data.duplicate_copies || 0), tone: "ignored" }].map((item) => <Box className="tracker-status" title={`${item.label}: ${item.value}`} key={item.label}><i className={item.tone} /><strong>{item.value}</strong><small>{item.label}</small></Box>)}
           </Box>
           <Typography className="tracker-caption">{assignedTotal} tracked messages connected to employees</Typography>
           <Box className="tracker-people">{topEmployees.length ? topEmployees.map((row, index) => <Box key={row.employee || row.name || index} title={`${row.employee || row.name}: ${Number(row.pending || 0)} pending, ${Number(row.resolved || row.replied || 0)} resolved`}><span>{String(row.employee || row.name || "Employee").slice(0, 18)}</span><LinearProgress variant="determinate" value={Math.min(100, (Number(row.total || row.emails || 0) / Math.max(1, assignedTotal)) * 100)} /><b>{Number(row.total || row.emails || 0)}</b></Box>) : <Typography variant="body2" color="text.secondary">Employee ownership appears after performance data is available.</Typography>}</Box>
@@ -2047,6 +2065,8 @@ export default function ProductionApp() {
     [mailboxes, setMailboxes] = useState<any[]>([]),
     [employees, setEmployees] = useState<any[]>([]),
     [selectedEmail, setSelectedEmail] = useState<any>(null),
+    [conversation, setConversation] = useState<any>(null),
+    [replyCandidates, setReplyCandidates] = useState<any[] | null>(null),
     [selectedEmployee, setSelectedEmployee] = useState<any>(null),
     [aiReviewOpen, setAiReviewOpen] = useState(false),
     [aiReviewConsent, setAiReviewConsent] = useState(false),
@@ -2096,9 +2116,11 @@ export default function ProductionApp() {
     ),
     [page, setPage] = useState(Number(initialQuery.get("page")) || 1),
     [settingsView, setSettingsView] = useState("sla-rules"),
-    [aiConfig, setAiConfig] = useState<{provider:string;model:string;configured:Record<string,boolean>;models:Record<string,Record<string,string>>}|null>(null),
+    [aiConfig, setAiConfig] = useState<{provider:string;model:string;configured:Record<string,boolean>;models:Record<string,Record<string,string>>;last_check?:{ok:boolean;message:string;model:string;tested_at:string}|null}|null>(null),
     [aiKey, setAiKey] = useState(""),
     [savingAiConfig, setSavingAiConfig] = useState(false),
+    [testingAiConfig, setTestingAiConfig] = useState(false),
+    [aiTestResult, setAiTestResult] = useState<{ok:boolean;message:string;model:string;tested_at:string}|null>(null),
     [reportPeriod, setReportPeriod] = useState("daily"),
     [reportDimension, setReportDimension] = useState("department"),
     [performanceSort, setPerformanceSort] = useState("employee"),
@@ -2545,10 +2567,13 @@ export default function ProductionApp() {
   };
   const openEmail = async (row: any) => {
     try {
+      setConversation(null);
+      setReplyCandidates(null);
       const detail = await api(`/emails/${row.id}`, token);
       api(`/emails/${row.id}/read`, token, { method: "PATCH" }).catch(() => undefined);
       setReplyDraft("");
       setSelectedEmail({ ...detail, content_loading: role === "admin" });
+      api(`/emails/${row.id}/conversation`, token).then(setConversation).catch(() => setConversation({ source_id: row.id, error: "Conversation details are unavailable." }));
       if (role === "admin") {
         try {
           const body = await api(`/emails/${row.id}/content`, token);
@@ -2560,6 +2585,20 @@ export default function ProductionApp() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load email");
     }
+  };
+  const findReplyCandidates = async () => {
+    if (!selectedEmail) return;
+    try { const result=await api(`/emails/${selectedEmail.id}/reply-candidates`,token);setReplyCandidates(result.candidates || []); }
+    catch (e) { setError(e instanceof Error ? e.message : "Unable to inspect reply candidates"); }
+  };
+  const linkReplyCandidate = async (replyId:number) => {
+    if (!selectedEmail) return;
+    try {
+      await api(`/emails/${selectedEmail.id}/link-reply`,token,{method:"POST",body:JSON.stringify({reply_id:replyId})});
+      setNotice("Reply linked. Response credit and reports updated.");
+      await openEmail({id:selectedEmail.id});
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to link reply"); }
   };
   const assistReply = async (mode: "draft" | "correct" | "rewrite") => {
     if (!selectedEmail) return;
@@ -2907,9 +2946,17 @@ export default function ProductionApp() {
       const saved = await api("/settings/ai-provider", token, { method: "PATCH", body: JSON.stringify({ provider: aiConfig.provider, model: aiConfig.model, api_key: aiKey || null }) });
       setAiConfig(saved);
       setAiKey("");
+      setAiTestResult(null);
       setNotice(saved.reviews_queued ? `AI provider and model saved. ${saved.reviews_queued} failed review${saved.reviews_queued === 1 ? "" : "s"} queued for retry.` : "AI provider and model saved. New AI requests use this selection.");
     } catch (e) { setError(e instanceof Error ? e.message : "AI settings could not be saved"); }
     finally { setSavingAiConfig(false); }
+  };
+  const testAiConfig = async () => {
+    setTestingAiConfig(true);
+    setAiTestResult(null);
+    try { const result=await api("/settings/ai-provider/test", token, { method: "POST" }); setAiTestResult(result); setAiConfig((current) => current ? { ...current, last_check: result } : current); }
+    catch (e) { setAiTestResult({ ok:false, message:e instanceof Error ? e.message : "AI connection test failed", model:aiConfig?.model || "", tested_at:new Date().toISOString() }); }
+    finally { setTestingAiConfig(false); }
   };
   const runSync = async () => {
     setSyncing(true);
@@ -3271,6 +3318,8 @@ export default function ProductionApp() {
                     <MenuItem value="overdue">{text("filter.overdue")}</MenuItem>
                     <MenuItem value="replied">{text("filter.replied")}</MenuItem>
                     <MenuItem value="ignored">Ignored</MenuItem>
+                    <MenuItem value="observer_copy">Observer copy</MenuItem>
+                    <MenuItem value="duplicate_copy">Duplicate copy</MenuItem>
                   </TextField>
                   <TextField
                     select
@@ -3406,7 +3455,7 @@ export default function ProductionApp() {
                 </Box>
               )}
               {section === "Reports" && <Alert severity="info" sx={{ mb: 2 }}>
-                {reportPeriod === "daily" ? "Today" : reportPeriod === "weekly" ? "Last 7 days" : "This month"} · Customer emails received since {formatMailboxDateTime(data?.period_start)}.
+                {reportPeriod === "daily" ? "Today" : reportPeriod === "weekly" ? "Last 7 days" : "This month"} · Inbox copies received since {formatMailboxDateTime(data?.period_start)}. Ignored, observer, and duplicate copies are separate report columns; reply rate uses replied and pending obligations.
                 {rows.every((row) => Number(row.total_received) === 0) && <> No incoming mail was received in this period.{data?.latest_received_at && <> Latest received mail: {formatMailboxDateTime(data.latest_received_at)}.</>} Choose a longer period to see earlier mail.</>}
               </Alert>}
               {section === "Employee Performance" && (
@@ -3500,10 +3549,16 @@ export default function ProductionApp() {
                   </TextField>
                   <TextField label={`${aiConfig.provider === "openrouter" ? "OpenRouter" : aiConfig.provider === "nvidia" ? "NVIDIA" : "Gemini"} API key`} type="password" autoComplete="new-password" value={aiKey} onChange={(e) => setAiKey(e.target.value)} helperText={aiConfig.configured[aiConfig.provider] ? "A key is saved. Leave blank to keep it." : "Add a key before saving this provider."} />
                   <Button variant="contained" disabled={savingAiConfig || (!aiConfig.configured[aiConfig.provider] && !aiKey.trim())} onClick={saveAiConfig}>{savingAiConfig ? "Saving…" : "Save AI settings"}</Button>
+                  <Button variant="outlined" disabled={testingAiConfig || savingAiConfig} onClick={testAiConfig}>{testingAiConfig ? "Testing…" : "Test saved connection"}</Button>
+                  <Typography variant="caption">Save your provider and model first. This test sends only synthetic text and may use a few provider tokens.</Typography>
+                  {aiTestResult && <Alert severity={aiTestResult.ok ? "success" : "error"}>{aiTestResult.message} Model: {aiTestResult.model}. Tested {new Date(aiTestResult.tested_at).toLocaleString()}.</Alert>}
+                  {!aiTestResult && aiConfig.last_check && <Alert severity={aiConfig.last_check.ok ? "success" : "warning"}>Last automatic or manual check: {aiConfig.last_check.message} Model: {aiConfig.last_check.model}. Tested {new Date(aiConfig.last_check.tested_at).toLocaleString()}.{!aiConfig.last_check.ok && " Check the saved key or model, then retry."}</Alert>}
+                  <Typography variant="caption">When scheduling is enabled, OEIS tests the saved model once daily with synthetic text. It never changes your provider or model automatically.</Typography>
                 </Box>
               )}
               {section !== "Settings" && section !== "AI Settings" && (
                 <>
+                  {section === "Mailboxes" && <SyncFreshnessAlert readiness={readiness} />}
                   {section === "Employee List" ? (
                     <Box>
                       <Chip size="small" label={`${employeeListRows.length} active employees`} sx={{ mb: 2 }} />
@@ -3882,6 +3937,29 @@ export default function ProductionApp() {
                   {selectedEmail.conversation_id || text("detail.unavailable")}
                 </span>
               </Box>
+              {conversation?.source_id === selectedEmail.id && <Box sx={{ mt: 2, mb: 2 }}>
+                {conversation.error ? <Alert severity="warning">{conversation.error}</Alert> : <Card variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle1">Conversation · {conversation.customer_message_count} customer messages · {conversation.completed_rounds} completed rounds · {conversation.pending_obligations} pending obligations</Typography>
+                  {conversation.partial_grouping && <Alert severity="info" sx={{ mt: 1 }}>Partial grouping: {conversation.grouping_note}</Alert>}
+                  {conversation.messages.map((message: any, index: number) => <Box key={message.id} sx={{ mt: 1.5, pt: 1, borderTop: index ? "1px solid #e5e7eb" : "none" }}>
+                    <Typography variant="body2"><strong>Round {index + 1}:</strong> {message.subject} · {formatMailboxDateTime(message.received_at, selectedEmail.mailbox_timezone)}</Typography>
+                    <Typography variant="caption">To: {message.to_employees.join(", ") || "No tracked employee"} · {message.status === "replied" ? `Replied by ${message.responder || "unknown"} at ${formatMailboxDateTime(message.replied_at, selectedEmail.mailbox_timezone)} · ${Number(message.reply_hours || 0).toFixed(2)} business hours` : "Awaiting reply"}</Typography>
+                    {message.handover_from && <Typography variant="caption" display="block">Handover from {message.handover_from} to {message.responder}</Typography>}
+                  </Box>)}
+                </Card>}
+              </Box>}
+              {role === "admin" && selectedEmail.status === "pending" && <Box sx={{ mb: 2 }}>
+                <Button size="small" onClick={findReplyCandidates}>Find unmatched reply candidates</Button>
+                {replyCandidates && <Card variant="outlined" sx={{ p: 2, mt: 1 }}>
+                  <Typography variant="subtitle2">Unmatched reply candidates · {replyCandidates.length}</Typography>
+                  {replyCandidates.length === 0 && <Typography variant="body2">No candidate with matching headers, conversation, or subject was found in the last 30 days.</Typography>}
+                  {replyCandidates.map((candidate) => <Box key={candidate.reply_id} sx={{ mt: 1, borderTop: "1px solid #e5e7eb", pt: 1 }}>
+                    <Typography variant="body2">{candidate.sender} · {candidate.subject}</Typography>
+                    <Typography variant="caption" display="block">{formatMailboxDateTime(candidate.sent_at, selectedEmail.mailbox_timezone)} · Evidence: {candidate.evidence.join(", ")}</Typography>
+                    <Button size="small" onClick={() => linkReplyCandidate(candidate.reply_id)}>Link this reply</Button>
+                  </Box>)}
+                </Card>}
+              </Box>}
               {role === "admin" && (
                 <Box className="email-content">
                   <Typography variant="subtitle2">{text("detail.message_content", "Message content")}</Typography>
@@ -3903,7 +3981,7 @@ export default function ProductionApp() {
                     </Box>
                     <Stack direction="row" spacing={1} alignItems="center">
                       {selectedEmail.status === "replied" && <Chip size="small" color="success" label="Replied" />}
-                      {selectedEmail.status === "ignored" && <Chip size="small" color="default" label="Ignored" />}
+                      {["ignored", "observer_copy", "duplicate_copy"].includes(selectedEmail.status) && <Chip size="small" color="default" label={replyStatusLabel(selectedEmail.status)} />}
                       {selectedEmail.status === "ignored" ? (
                         <Button size="small" onClick={() => updateEmailStatus("pending")}>Restore</Button>
                       ) : (

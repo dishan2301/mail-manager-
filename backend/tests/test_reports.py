@@ -57,6 +57,8 @@ def report_db(monkeypatch):
 
 def mail(db, message_id, when=None, **values):
     values = {"mailbox_id": 1, "message_id": message_id, "conversation_id": message_id, "sender": "customer@example.com", "receiver": "one@indianinfotech.org", "subject": "Request", "received_time": when or Clock.now(timezone.utc), "folder": "inbox", "classification": Classification.CUSTOMER, "status": EmailStatus.PENDING, "assigned_employee_id": 1, **values}
+    if values["status"] == EmailStatus.REPLIED:
+        values.setdefault("responder_employee_id", values["assigned_employee_id"])
     row = Email(**values)
     db.add(row)
     db.commit()
@@ -183,6 +185,20 @@ def test_totals_employee_identity_scoping_and_exports(report_db, monkeypatch):
     no_access = client.get(endpoint + "?dimension=employee").json()
     assert no_access["rows"] == [] and no_access["latest_received_at"] is None
     assert client.get(endpoint + "/employees/1/ai-review").json()["conversation_count"] == 0
+
+
+def test_copy_statuses_are_separate_from_ignored_in_dashboard_and_reports(report_db):
+    sessions, client = report_db
+    with sessions() as db:
+        mail(db, "observer", status=EmailStatus.OBSERVER_COPY, assigned_employee_id=None)
+        mail(db, "duplicate", status=EmailStatus.DUPLICATE_COPY, assigned_employee_id=None)
+        mail(db, "ignored", status=EmailStatus.IGNORED)
+    dashboard = client.get("/api/dashboard/kpis").json()
+    assert (dashboard["observer_copies"], dashboard["duplicate_copies"], dashboard["ignored_emails"]) == (1, 1, 1)
+    row = client.get("/api/reports/monthly?dimension=customer").json()["rows"][0]
+    assert (row["observer_copy"], row["duplicate_copy"], row["ignored"]) == (1, 1, 1)
+    exported = list(csv.DictReader(StringIO(client.get("/api/reports/monthly/export?dimension=customer&format=csv").content.decode("utf-8-sig"))))[0]
+    assert (exported["observer_copy"], exported["duplicate_copy"], exported["ignored"]) == ("1", "1", "1")
 
 
 def test_daily_run_covers_all_changed_conversations_and_paginates(report_db, monkeypatch):
@@ -354,6 +370,8 @@ def test_continuous_review_schedule_starts_immediately_and_checks_every_30_secon
     assert job.trigger.interval.total_seconds() == 30
     assert abs((job.next_run_time-before).total_seconds()) < 2
     assert job.max_instances == 1 and job.coalesce is True
+    daily = scheduler.build_scheduler(operation, operation, operation, operation).get_job("daily-ai-connection")
+    assert "hour='18'" in str(daily.trigger) and "minute='1'" in str(daily.trigger)
 
 
 def test_five_conversations_are_reviewed_independently(report_db, monkeypatch):
@@ -446,6 +464,94 @@ def test_shared_to_mail_is_pending_for_both_but_only_responder_gets_credit(repor
     exported_rows={row["employee_id"]:row for row in csv.DictReader(StringIO(exported.content.decode("utf-8-sig")))}
     assert exported_rows["2"]["replied_by_other"]=="1"
     assert exported_rows["2"]["replied"]=="0"
+
+
+def test_reassigning_replied_mail_does_not_transfer_credit(report_db):
+    sessions, client = report_db
+    with sessions() as db:
+        answered = mail(db, "answered", status=EmailStatus.REPLIED, responder_employee_id=1,
+                        assigned_employee_id=1, replied_at=Clock.now(timezone.utc))
+        original_time = answered.replied_at
+        routes.assign_email(answered.id, request=SimpleNamespace(state=SimpleNamespace()),
+                            employee_id=2, principal={"user_id": 1}, db=db)
+        db.refresh(answered)
+        assert answered.assignment_overridden is True
+        assert answered.responder_employee_id == 1
+        assert answered.replied_at == original_time
+    performance = {row["id"]: row for row in client.get("/api/employees/performance").json()}
+    assert performance[1]["replied"] == 1
+    assert performance[2]["replied"] == 0
+    rows = {row["employee_id"]: row for row in client.get("/api/reports/monthly?dimension=employee").json()["rows"]}
+    assert rows[1]["replied"] == 1 and rows[2]["replied_by_other"] == 1
+
+
+def test_manual_reply_link_uses_evidence_and_recalculates_credit(report_db,monkeypatch):
+    from app.services.sync import reconcile_replies
+    sessions,client=report_db
+    events=[]
+    monkeypatch.setattr(routes,"audit",lambda _db,_request,action,_outcome,_actor,_kind,_id,details:events.append((action,details)))
+    with sessions() as db:
+        original=mail(db,"unmatched-original",receiver="one@indianinfotech.org",conversation_id="original-thread")
+        reply=mail(db,"unmatched-reply",Clock.now(timezone.utc)+timedelta(minutes=10),sender="two@indianinfotech.org",receiver="customer@example.com",subject="Re: Request",conversation_id="other-thread",status=EmailStatus.OBSERVER_COPY,assigned_employee_id=None)
+        candidate=routes.reply_candidates(original.id,principal={"role":"admin","user_id":1},db=db)["candidates"]
+        assert [row["reply_id"] for row in candidate]==[reply.id]
+        assert candidate[0]["evidence"]==["same subject within 30 days"]
+        result=routes.link_reply(original.id,{"reply_id":reply.id},SimpleNamespace(state=SimpleNamespace()),principal={"role":"admin","user_id":1},db=db)
+        assert result["status"]=="replied" and result["responder_employee_id"]==2
+        assert events==[("email.reply.manual_link",{"original_id":original.id,"reply_id":reply.id})]
+        assert routes.reply_candidates(original.id,principal={"role":"admin","user_id":1},db=db)["candidates"]==[]
+        reconcile_replies(db,[]);db.commit()
+        db.refresh(original)
+        assert original.reply_email_id==reply.id and original.reply_link_source=="manual"
+    performance={row["id"]:row for row in client.get("/api/employees/performance").json()}
+    assert performance[2]["replied"]==1 and performance[1]["replied"]==0
+
+
+def test_two_customer_rounds_in_one_conversation_credit_each_responder(report_db,monkeypatch):
+    from app.repositories.email import EmailRepository
+    from app.services.sync import reconcile_replies
+    from app.services import authorization
+    monkeypatch.setattr(authorization,"mailbox_scope",lambda *_:[1])
+    sessions, client = report_db
+    start = Clock.now(timezone.utc)
+    with sessions() as db:
+        db.get(Mailbox, 1).address = "ceo@indianinfotech.org"
+        first = mail(db, "round-one", start, receiver="one@indianinfotech.org, two@indianinfotech.org", conversation_id="meeting", internet_message_id="<round-one>")
+        employees = list(db.scalars(select(Employee)))
+        reconcile_replies(db, employees); db.commit()
+        performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
+        assert performance[1]["pending"] == performance[2]["pending"] == 1
+        mail(db, "answer-one", start + timedelta(minutes=10), sender="one@indianinfotech.org", receiver="customer@example.com", conversation_id="meeting", internet_message_id="<answer-one>", in_reply_to="<round-one>")
+        reconcile_replies(db, employees); db.commit()
+        second = mail(db, "round-two", start + timedelta(minutes=20), receiver="one@indianinfotech.org, two@indianinfotech.org", conversation_id="meeting", internet_message_id="<round-two>")
+        reconcile_replies(db, employees); db.commit()
+        assert first.status == EmailStatus.REPLIED and second.status == EmailStatus.PENDING
+        performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
+        assert performance[1]["pending"] == performance[2]["pending"] == 1
+        mail(db, "answer-two", start + timedelta(minutes=30), sender="two@indianinfotech.org", receiver="customer@example.com", conversation_id="meeting", internet_message_id="<answer-two>", in_reply_to="<round-two>")
+        reconcile_replies(db, employees); db.commit()
+        performance = {row["id"]: row for row in EmailRepository(db).employee_performance([1])}
+        assert all(performance[id]["received"] == 2 and performance[id]["pending"] == 0 and performance[id]["replied"] == 1 and performance[id]["replied_by_other"] == 1 for id in (1, 2))
+        first_id = first.id
+    report = client.get("/api/reports/monthly?dimension=employee").json()["rows"]
+    assert all(row["total_received"] == 2 for row in report)
+    with sessions() as db:
+        mail(db,"other-thread",start+timedelta(minutes=40),conversation_id="unrelated",internet_message_id="<other-thread>")
+        mail(db,"orphan-other-thread",start+timedelta(minutes=50),sender="two@indianinfotech.org",receiver="customer@example.com",subject="Re: Request",conversation_id="different-thread",internet_message_id="<orphan-other-thread>")
+        mail(db,"duplicate-round-one",start,mailbox_id=2,receiver="one@indianinfotech.org, two@indianinfotech.org",conversation_id="meeting",internet_message_id="<round-one>")
+        reconcile_replies(db,list(db.scalars(select(Employee))));db.commit()
+    response = client.get(f"/api/emails/{first_id}/conversation")
+    assert response.status_code == 200, response.text
+    conversation = response.json()
+    assert (conversation["customer_message_count"], conversation["conversation_count"], conversation["completed_rounds"], conversation["pending_obligations"]) == (2, 1, 2, 0)
+    assert [row["responder_employee_id"] for row in conversation["messages"]] == [1, 2]
+    assert conversation["messages"][1]["handover_from"] == "Same Name"
+    assert [row["reply_hours"] for row in conversation["messages"]] == [0, 0]  # Both rounds occur outside business hours.
+    assert all(row["replied_at"] for row in conversation["messages"])
+    assert conversation["partial_grouping"] is True
+    with sessions() as db:
+        private_id=mail(db,"private-conversation",mailbox_id=2).id
+    assert client.get(f"/api/emails/{private_id}/conversation").status_code==404
 
 
 def test_recipient_migration_is_safe_on_current_schema(report_db):
